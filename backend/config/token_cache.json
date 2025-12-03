@@ -1,0 +1,72 @@
+{
+  "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+    "symbol": "USDC",
+    "decimals": 6,
+    "coingecko_id": "usd-coin"
+  },
+  "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+    "symbol": "USDT",
+    "decimals": 6,
+    "coingecko_id": "tether"
+  },
+  "0x6b175474e89094c44da98b954eedeac495271d0f": {
+    "symbol": "DAI",
+    "decimals": 18,
+    "coingecko_id": "dai"
+  },
+  "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+    "symbol": "WETH",
+    "decimals": 18,
+    "coingecko_id": "weth"
+  },
+  "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": {
+    "symbol": "WBTC",
+    "decimals": 8,
+    "coingecko_id": "wrapped-bitcoin"
+  },
+  "0x514910771af9ca656af840dff83e8264ecf986ca": {
+    "symbol": "LINK",
+    "decimals": 18,
+    "coingecko_id": "chainlink"
+  },
+  "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9": {
+    "symbol": "AAVE",
+    "decimals": 18,
+    "coingecko_id": "aave"
+  },
+  "0x5a98fcbea516cf06857215779fd812ca3bef1b32": {
+    "symbol": "LDO",
+    "decimals": 18,
+    "coingecko_id": "lido-dao"
+  },
+  "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984": {
+    "symbol": "UNI",
+    "decimals": 18,
+    "coingecko_id": "uniswap"
+  },
+  "0x0baba1ad5cc0c5b6d5c7e5e9f04f0416f21eb4ba": {
+    "symbol": "ARB",
+    "decimals": 18,
+    "coingecko_id": "arbitrum"
+  },
+  "0x4200000000000000000000000000000000000042": {
+    "symbol": "OP",
+    "decimals": 18,
+    "coingecko_id": "optimism"
+  },
+  "0x7d1afa7b718fb893db30a3abc0cfc608aacfebb0": {
+    "symbol": "MATIC",
+    "decimals": 18,
+    "coingecko_id": "matic-network"
+  },
+  "0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce": {
+    "symbol": "SHIB",
+    "decimals": 18,
+    "coingecko_id": "shiba-inu"
+  },
+  "0xbebb9cc92c78ef8a7a48e7ec3d8f5f8ce7b4f2cc": {
+    "symbol": "PEPE",
+    "decimals": 18,
+    "coingecko_id": "pepe"
+  }
+}

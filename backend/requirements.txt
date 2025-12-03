@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+alembic
+psycopg2-binary
+pydantic
+pydantic-settings
+httpx
+web3
+apscheduler
+python-dotenv
+python-dateutil
+pyyaml

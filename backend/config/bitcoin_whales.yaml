@@ -1,0 +1,32 @@
+# Add Bitcoin whale addresses here before running seed_bitcoin_whales.py
+# Leave empty to skip seeding.
+# NOTE:
+# - This list mixes exchange / government / corporate treasuries and large whale EOAs or custodial clusters.
+# - If your logic should exclude exchanges/custodial/government addresses, filter them out in code by label / behavior.
+
+# === Major entity / treasury-level whales ===
+
+- address: "bc1qjasf9z3h7w3jspkhtgatgpyvvzgpa2wwd2lr0eh5tx44reyn2k7sfc27a4"  # Tether main BTC reserve address
+  labels: ["treasury", "tether"]
+- address: "bc1qazcm763858nkj2dj986etajv6wquslv8uxwczt"  # US government Bitfinex-hack seizure wallet (~94k BTC)
+  labels: ["government", "us_gov", "seized", "bitfinex_hack"]
+
+# === Large exchange / custodial wallets ===
+
+- address: "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo"  # Binance cold wallet #1 (richest BTC address)
+  labels: ["exchange", "binance", "cold_wallet"]
+- address: "3M219KR5vEneNb47ewrPfWyb5jQ2DjxRP6"  # Binance cold wallet #2
+  labels: ["exchange", "binance", "cold_wallet"]
+- address: "bc1qgdjqv0av3q56jvd82tkdjpy7gdp9ut8tlqmgrpmv24sq90ecnvqqjwvw97"  # Bitfinex cold wallet
+  labels: ["exchange", "bitfinex", "cold_wallet"]
+- address: "bc1ql49ydapnjafl5t2cp9zqpjwe6pdgmxy98859v2"  # Robinhood cold wallet
+  labels: ["exchange", "robinhood", "custodial"]
+- address: "bc1qd4ysezhmypwty5dnw7c8nqy5h5nxg0xqsvaefd0qn5kq32vwnwqqgv4rzr"  # Large unlabeled custodial/cluster wallet
+  labels: ["custodial", "whale"]
+
+# === Dormant / OG / special wallets ===
+
+- address: "1FeexV6bAHb8ybZjqQMJircCrHGW9sb6uF"  # ~80k BTC dormant since 2011, widely tracked "1Feex" whale
+  labels: ["dormant", "whale", "suspected_hack"]
+- address: "1LdRcdxfbSnmCYYNdeYpUnztiYzvfBEQeC"  # Large dormant wallet (50k+ BTC, never spent)
+  labels: ["dormant", "whale"]
