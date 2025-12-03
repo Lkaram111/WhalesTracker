@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Iterable
+import time
+from typing import Any, Iterable
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
-import time
 from sqlalchemy.orm import Session
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.models import (
     Chain,
@@ -207,34 +209,19 @@ def recompute_wallet_metrics(session: Session, whale: Whale) -> None:
                 else 0.0
             )
 
-    # Avoid double-inserting metrics when recompute is called multiple times in one transaction
-    metrics = next(
-        (m for m in session.new if isinstance(m, CurrentWalletMetrics) and m.whale_id == whale.id),
-        None,
+    _upsert_current_metrics(
+        session,
+        {
+            "whale_id": whale.id,
+            "portfolio_value_usd": portfolio_value,
+            "roi_percent": roi_percent,
+            "realized_pnl_usd": realized_pnl,
+            "unrealized_pnl_usd": unrealized_pnl,
+            "volume_30d_usd": volume_30d,
+            "trades_30d": trades_30d,
+            "win_rate_percent": win_rate_percent,
+        },
     )
-    if not metrics:
-        metrics = session.get(CurrentWalletMetrics, whale.id)
-    if metrics:
-        metrics.portfolio_value_usd = portfolio_value
-        metrics.roi_percent = roi_percent
-        metrics.realized_pnl_usd = realized_pnl
-        metrics.unrealized_pnl_usd = unrealized_pnl
-        metrics.volume_30d_usd = volume_30d
-        metrics.trades_30d = trades_30d
-        metrics.win_rate_percent = win_rate_percent
-    else:
-        session.add(
-            CurrentWalletMetrics(
-                whale_id=whale.id,
-                portfolio_value_usd=portfolio_value,
-                roi_percent=roi_percent,
-                realized_pnl_usd=realized_pnl,
-                unrealized_pnl_usd=unrealized_pnl,
-                volume_30d_usd=volume_30d,
-                trades_30d=trades_30d,
-                win_rate_percent=win_rate_percent,
-            )
-        )
 
     today = date.today()
     pending_daily = next(
@@ -273,6 +260,31 @@ def recompute_wallet_metrics(session: Session, whale: Whale) -> None:
                 win_rate_percent=win_rate_percent,
             )
         )
+
+
+def _upsert_current_metrics(session: Session, payload: dict[str, Any]) -> None:
+    """DB-atomic upsert to avoid duplicate current_wallet_metrics rows."""
+    update_values = {k: v for k, v in payload.items() if k != "whale_id"}
+    dialect = session.bind.dialect.name if session.bind else ""  # type: ignore[attr-defined]
+    if dialect in {"sqlite", "postgresql", "postgres"}:
+        stmt = (
+            sqlite_insert(CurrentWalletMetrics)
+            if dialect == "sqlite"
+            else pg_insert(CurrentWalletMetrics)
+        ).values(**payload)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[CurrentWalletMetrics.whale_id],
+            set_={**update_values, "updated_at": func.now()},
+        )
+        session.execute(stmt)
+    else:
+        metrics = session.get(CurrentWalletMetrics, payload["whale_id"])
+        if metrics:
+            for key, value in update_values.items():
+                setattr(metrics, key, value)
+            metrics.updated_at = datetime.now(timezone.utc)
+        else:
+            session.add(CurrentWalletMetrics(**payload))
 
 
 def recompute_all_wallet_metrics(session: Session) -> None:
