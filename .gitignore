@@ -1,6 +1,8 @@
 .env
 backend/.env
 backend/data/*.db
+backend/backend/data/*.db
+data/*.db
 **/__pycache__/
 .pytest_cache/
 *.pyc
