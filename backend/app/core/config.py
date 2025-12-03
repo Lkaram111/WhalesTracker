@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     bitcoin_api_base_url: str = "https://mempool.space/api"
 
     hyperliquid_info_url: str = "https://api.hyperliquid.xyz/info"
+    hyperliquid_max_rps: float = Field(default=3.0, alias="HYPERLIQUID_MAX_RPS")
 
     coingecko_api_base_url: str = "https://api.coingecko.com/api/v3"
 

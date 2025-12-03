@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -21,10 +21,24 @@ if db_url.startswith("sqlite"):
     else:
         path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    connect_args = {"check_same_thread": False}
+    # Give SQLite more breathing room under concurrent writers (scheduler + API)
+    connect_args = {"check_same_thread": False, "timeout": 60}
     db_url = f"sqlite:///{path}"
 
 engine = create_engine(db_url, future=True, echo=False, connect_args=connect_args)
+
+# Improve SQLite concurrency (WAL + reasonable fsync)
+if db_url.startswith("sqlite"):
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):  # pragma: no cover - DB wiring
+        try:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL;")
+            cursor.execute("PRAGMA synchronous=NORMAL;")
+            cursor.execute("PRAGMA busy_timeout=60000;")
+            cursor.close()
+        except Exception:
+            pass
 SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,

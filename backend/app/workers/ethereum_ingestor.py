@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import time
 from decimal import Decimal
 from typing import Iterable
 
@@ -9,6 +10,7 @@ import logging
 from sqlalchemy import select
 from web3 import Web3
 
+from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models import Chain, Event, EventType, Trade, TradeDirection, TradeSource, Whale
 from app.services.coingecko_client import coingecko_client
@@ -31,37 +33,56 @@ class EthereumIngestor:
         self._running = False
         self._eth_price_usd: float | None = None
         self._token_prices: dict[str, float] = {}
+        self._warned_no_provider = False
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def run_forever(self) -> None:
         self._running = True
+        self._loop = asyncio.get_running_loop()
+        logger.info("Ethereum ingestor started (interval=%ss)", self.poll_interval)
         while self._running:
+            started = time.perf_counter()
             try:
-                await self.process_latest_block()
+                await asyncio.to_thread(self.process_latest_block)
+                logger.debug("Ethereum ingestor tick finished in %.2fs", time.perf_counter() - started)
             except Exception:
                 logger.exception("Ethereum ingestor loop error")
             await asyncio.sleep(self.poll_interval)
+        logger.info("Ethereum ingestor stopped")
 
     def stop(self) -> None:
         self._running = False
 
-    async def process_latest_block(self) -> None:
-        block = get_block("latest")
+    def process_latest_block(self) -> None:
+        if not settings.ethereum_rpc_http_url:
+            if not self._warned_no_provider:
+                logger.warning("Ethereum RPC HTTP URL not configured; skipping ingestion.")
+                self._warned_no_provider = True
+            return
+        try:
+            block = get_block("latest")
+        except RuntimeError as exc:
+            logger.warning("Ethereum ingestor could not fetch block: %s", exc)
+            return
         if not block:
             return
 
         txs = block.get("transactions", [])
         timestamp = datetime.fromtimestamp(block.get("timestamp", 0), tz=timezone.utc)
         tx_list = txs if isinstance(txs, Iterable) else []
+        logger.debug("Ethereum ingestor fetched block with %s txs", len(tx_list))
 
         with SessionLocal() as session:
             eth_chain = session.query(Chain).filter(Chain.slug == "ethereum").one_or_none()
             if not eth_chain:
+                logger.debug("Ethereum chain missing in DB; skipping tick")
                 return
             whales = {
                 w.address.lower(): w
                 for w in session.query(Whale).filter(Whale.chain_id == eth_chain.id).all()
             }
             if not whales:
+                logger.debug("No Ethereum whales configured; skipping tick")
                 return
 
             self._eth_price_usd = self._fetch_eth_price()
@@ -89,6 +110,13 @@ class EthereumIngestor:
                         self._record_transfer(session, eth_chain.id, whale, tx, timestamp)
 
             session.commit()
+
+    def backfill_whale(self, session, chain_id: int, whale: Whale) -> bool:
+        if not settings.ethereum_rpc_http_url:
+            logger.warning("Ethereum RPC HTTP URL not configured; skipping backfill for %s", whale.address)
+            return False
+        logger.info("Ethereum backfill is not yet implemented; configure an RPC scanner to populate %s", whale.address)
+        return False
 
     def _record_transfer(
         self,
@@ -172,25 +200,29 @@ class EthereumIngestor:
                 details={},
             )
         )
-        try:
-            msg = {
-                "id": tx_hash or "",
-                "timestamp": timestamp.isoformat(),
+        msg = {
+            "id": tx_hash or "",
+            "timestamp": timestamp.isoformat(),
+            "chain": "ethereum",
+            "type": event_type.value if hasattr(event_type, "value") else str(event_type),
+            "wallet": {
+                "address": whale.address,
                 "chain": "ethereum",
-                "type": event_type.value if hasattr(event_type, "value") else str(event_type),
-                "wallet": {
-                    "address": whale.address,
-                    "chain": "ethereum",
-                    "label": (whale.labels or [None])[0] if whale.labels else None,
-                },
-                "summary": summary,
-                "value_usd": value_usd or 0.0,
-                "tx_hash": tx_hash,
-                "details": {},
-            }
-            asyncio.create_task(broadcast_manager.broadcast(msg))
+                "label": (whale.labels or [None])[0] if whale.labels else None,
+            },
+            "summary": summary,
+            "value_usd": value_usd or 0.0,
+            "tx_hash": tx_hash,
+            "details": {},
+        }
+        self._schedule_broadcast(msg)
+
+    def _schedule_broadcast(self, msg: dict) -> None:
+        try:
+            if self._loop and self._loop.is_running():
+                self._loop.call_soon_threadsafe(asyncio.create_task, broadcast_manager.broadcast(msg))
         except Exception:
-            pass
+            logger.debug("Ethereum broadcast scheduling failed", exc_info=True)
 
     def _record_receipt_transfers(
         self,

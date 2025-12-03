@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
+import time
 
 from fastapi import APIRouter, HTTPException, Path, Query
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy.exc import OperationalError
 
 from app.db.session import SessionLocal
 from app.models import (
@@ -25,7 +27,10 @@ from app.schemas.api import (
     WalletSummary,
 )
 from app.services.hyperliquid_client import hyperliquid_client
-from app.services.metrics_service import recompute_wallet_metrics
+from app.services.metrics_service import (
+    recompute_wallet_metrics,
+    rebuild_portfolio_history_from_trades,
+)
 
 router = APIRouter()
 
@@ -34,6 +39,18 @@ EXPLORER_BASES = {
     "bitcoin": "https://mempool.space/address/",
     "hyperliquid": "https://explorer.hyperliquid.xyz/account/",
 }
+
+
+def _commit_with_retry(session, retries: int = 3, delay: float = 0.5) -> None:
+    for attempt in range(retries):
+        try:
+            session.commit()
+            return
+        except OperationalError:
+            session.rollback()
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay)
 
 
 def build_explorer_url(chain: str, address: str) -> str:
@@ -54,7 +71,7 @@ def _ensure_metrics_up_to_date(session, whale: Whale) -> CurrentWalletMetrics | 
         or (last_holding and (metrics.updated_at is None or metrics.updated_at < last_holding))
     ):
         recompute_wallet_metrics(session, whale)
-        session.commit()
+        _commit_with_retry(session)
         metrics = session.get(CurrentWalletMetrics, whale.id)
     return metrics
 
@@ -160,6 +177,7 @@ async def get_wallet_detail(
 
         whale_type = whale.type.value if hasattr(whale.type, "value") else str(whale.type).lower()
         summary = WalletSummary(
+            id=whale.id,
             address=whale.address,
             chain=chain_obj.slug,  # type: ignore[arg-type]
             type=whale_type,
@@ -236,12 +254,20 @@ async def get_portfolio_history(
         from app.models import WalletMetricsDaily
 
         since = datetime.now(timezone.utc).date() - timedelta(days=days)
-        rows = (
-            session.query(WalletMetricsDaily)
-            .filter(WalletMetricsDaily.whale_id == whale.id, WalletMetricsDaily.date >= since)
-            .order_by(WalletMetricsDaily.date.asc())
-            .all()
-        )
+        def _fetch():
+            return (
+                session.query(WalletMetricsDaily)
+                .filter(WalletMetricsDaily.whale_id == whale.id, WalletMetricsDaily.date >= since)
+                .order_by(WalletMetricsDaily.date.asc())
+                .all()
+            )
+
+        rows = _fetch()
+        if len(rows) < 2:
+            rebuild_portfolio_history_from_trades(session, whale)
+            recompute_wallet_metrics(session, whale)
+            _commit_with_retry(session)
+            rows = _fetch()
         points = [
             {
                 "timestamp": datetime.combine(r.date, datetime.min.time(), tzinfo=timezone.utc),

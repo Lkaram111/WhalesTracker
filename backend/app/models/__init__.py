@@ -5,6 +5,7 @@ from app.models.tables import (
     CurrentWalletMetrics,
     Event,
     EventType,
+    IngestionCheckpoint,
     Holding,
     PriceHistory,
     Trade,
@@ -29,4 +30,5 @@ __all__ = [
     "Event",
     "EventType",
     "PriceHistory",
+    "IngestionCheckpoint",
 ]

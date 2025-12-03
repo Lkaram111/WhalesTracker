@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import time
+
+from sqlalchemy.exc import OperationalError
 
 from sqlalchemy.orm import Session
 
@@ -25,4 +28,16 @@ def update_prices(session: Session) -> None:
                 price_usd=price,
             )
         )
-    session.commit()
+    _commit_with_retry(session)
+
+
+def _commit_with_retry(session: Session, retries: int = 3, delay: float = 0.5) -> None:
+    for attempt in range(retries):
+        try:
+            session.commit()
+            return
+        except OperationalError:
+            session.rollback()
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay)

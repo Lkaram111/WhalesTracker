@@ -7,6 +7,7 @@ import type {
   WhaleCreateRequest,
   WhaleSummary,
   WalletDetails,
+  BackfillStatus,
 } from '@/types/api';
 
 const baseUrl = import.meta.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
@@ -42,6 +43,12 @@ export const api = {
     apiGet<{ items: WhaleSummary[]; total: number }>(`/api/v1/whales?${params.toString()}`),
   createWhale: (payload: WhaleCreateRequest) =>
     apiPost<WhaleSummary>('/api/v1/whales', payload),
+  getBackfillStatus: (whaleId: string) =>
+    apiGet<BackfillStatus>(`/api/v1/whales/${whaleId}/backfill_status`),
+  resolveWhale: (chain: string, address: string) =>
+    apiGet<{ whale_id: string }>(`/api/v1/whales/resolve?chain=${chain}&address=${address}`),
+  resetHyperliquid: (whaleId: string) =>
+    apiPost<BackfillStatus>(`/api/v1/whales/${whaleId}/reset_hyperliquid`, {}),
   getRecentEvents: (limit = 10) =>
     apiGet<{ items: LiveEvent[] }>(`/api/v1/events/recent?limit=${limit}`),
   getLiveEvents: (limit = 50) =>

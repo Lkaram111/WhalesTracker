@@ -17,6 +17,7 @@ class DashboardSummary(BaseModel):
 
 
 class WhaleSummary(BaseModel):
+    id: str
     address: str
     chain: ChainId
     type: WhaleType
@@ -109,6 +110,7 @@ class LiveEvent(BaseModel):
 
 
 class WalletSummary(BaseModel):
+    id: str | None = None
     address: str
     chain: ChainId
     type: WhaleType
@@ -154,6 +156,19 @@ class WhaleCreateRequest(BaseModel):
     chain: ChainId
     labels: list[str] = Field(default_factory=list)
     type: WhaleType | None = None
+
+
+class BackfillStatus(BaseModel):
+    whale_id: str
+    chain: ChainId | None = None
+    status: Literal["idle", "running", "done", "error"]
+    progress: float
+    message: str | None = None
+    updated_at: datetime | None = None
+
+
+class ResolveWhaleResponse(BaseModel):
+    whale_id: str
 
 
 class RoiHistoryResponse(BaseModel):

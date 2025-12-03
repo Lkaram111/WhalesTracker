@@ -2,6 +2,7 @@ export type ChainId = 'ethereum' | 'bitcoin' | 'hyperliquid';
 export type WhaleType = 'holder' | 'trader' | 'holder_trader';
 
 export interface WhaleSummary {
+  id: string;
   address: string;
   chain: ChainId;
   type: WhaleType;
@@ -93,6 +94,7 @@ export interface DashboardSummary {
 
 export interface WalletDetails {
   wallet: {
+    id?: string;
     address: string;
     chain: ChainId;
     type: WhaleType;
@@ -119,4 +121,13 @@ export interface WhaleCreateRequest {
   chain: ChainId;
   labels?: string[];
   type?: WhaleType;
+}
+
+export interface BackfillStatus {
+  whale_id: string;
+  chain?: ChainId | null;
+  status: 'idle' | 'running' | 'done' | 'error';
+  progress: number;
+  message?: string | null;
+  updated_at?: string | null;
 }

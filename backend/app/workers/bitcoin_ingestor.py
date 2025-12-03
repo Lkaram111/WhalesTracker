@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import time
+from typing import Callable
 
 import logging
+from httpx import HTTPStatusError
 from sqlalchemy import select
 
 from app.db.session import SessionLocal
@@ -21,26 +24,35 @@ class BitcoinIngestor:
         self.poll_interval = poll_interval
         self._running = False
         self._btc_price_usd: float | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def run_forever(self) -> None:
         self._running = True
+        self._loop = asyncio.get_running_loop()
+        logger.info("Bitcoin ingestor started (interval=%ss)", self.poll_interval)
         while self._running:
+            started = time.perf_counter()
             try:
-                await self.process_addresses()
+                await asyncio.to_thread(self.process_addresses)
+                logger.debug("Bitcoin ingestor tick finished in %.2fs", time.perf_counter() - started)
             except Exception:
                 logger.exception("Bitcoin ingestor loop error")
             await asyncio.sleep(self.poll_interval)
+        logger.info("Bitcoin ingestor stopped")
 
     def stop(self) -> None:
         self._running = False
 
-    async def process_addresses(self) -> None:
+    def process_addresses(self) -> None:
+        logger.debug("Bitcoin ingestor polling addresses")
         with SessionLocal() as session:
             btc_chain = session.query(Chain).filter(Chain.slug == "bitcoin").one_or_none()
             if not btc_chain:
+                logger.debug("Bitcoin chain missing in DB; skipping tick")
                 return
             whales = session.query(Whale).filter(Whale.chain_id == btc_chain.id).all()
             if not whales:
+                logger.debug("No Bitcoin whales configured; skipping tick")
                 return
 
             self._btc_price_usd = self._fetch_btc_price()
@@ -57,8 +69,8 @@ class BitcoinIngestor:
         except Exception:
             return None
 
-    def _process_whale(self, session, chain_id: int, whale: Whale) -> None:
-        txs = bitcoin_client.get_address_txs(whale.address, limit=20)
+    def _ingest_transactions(self, session, chain_id: int, whale: Whale, txs: list[dict]) -> int:
+        inserted = 0
         for tx in txs:
             txid = tx.get("txid")
             if txid:
@@ -121,6 +133,56 @@ class BitcoinIngestor:
                 summary=f"BTC {direction.value}",
             )
             touch_last_active(session, whale, timestamp)
+            inserted += 1
+        return inserted
+
+    def _process_whale(self, session, chain_id: int, whale: Whale) -> None:
+        try:
+            txs = bitcoin_client.get_address_txs(whale.address, limit=20)
+        except HTTPStatusError as exc:
+            logger.warning(
+                "Skipping Bitcoin whale %s due to HTTP %s: %s",
+                whale.address,
+                exc.response.status_code if exc.response else "-",
+                exc,
+            )
+            return
+        self._ingest_transactions(session, chain_id, whale, txs)
+
+    def backfill_whale(
+        self,
+        session,
+        chain_id: int,
+        whale: Whale,
+        batch_size: int = 100,
+        max_pages: int = 20,
+        progress_cb: Callable[[float, str | None], None] | None = None,
+    ) -> bool:
+        progress = progress_cb
+        offset = 0
+        total_inserted = 0
+        for idx in range(max_pages):
+            try:
+                txs = bitcoin_client.get_address_txs(whale.address, limit=batch_size, offset=offset)
+            except HTTPStatusError as exc:
+                logger.warning(
+                    "Skipping Bitcoin backfill for %s due to HTTP %s: %s",
+                    whale.address,
+                    exc.response.status_code if exc.response else "-",
+                    exc,
+                )
+                break
+            if not txs:
+                break
+            inserted = self._ingest_transactions(session, chain_id, whale, txs)
+            total_inserted += inserted
+            offset += len(txs)
+            if progress:
+                pct = min(100.0, ((idx + 1) / max_pages) * 100.0)
+                progress(pct, f"bitcoin backfill page {idx + 1}/{max_pages}")
+            if len(txs) < batch_size or inserted == 0:
+                break
+        return total_inserted > 0
 
     def _record_event(
         self,
@@ -145,25 +207,29 @@ class BitcoinIngestor:
                 details={},
             )
         )
-        try:
-            msg = {
-                "id": tx_hash or "",
-                "timestamp": timestamp.isoformat(),
+        msg = {
+            "id": tx_hash or "",
+            "timestamp": timestamp.isoformat(),
+            "chain": "bitcoin",
+            "type": event_type.value if hasattr(event_type, "value") else str(event_type),
+            "wallet": {
+                "address": whale.address,
                 "chain": "bitcoin",
-                "type": event_type.value if hasattr(event_type, "value") else str(event_type),
-                "wallet": {
-                    "address": whale.address,
-                    "chain": "bitcoin",
-                    "label": (whale.labels or [None])[0] if whale.labels else None,
-                },
-                "summary": summary,
-                "value_usd": value_usd or 0.0,
-                "tx_hash": tx_hash,
-                "details": {},
-            }
-            asyncio.create_task(broadcast_manager.broadcast(msg))
+                "label": (whale.labels or [None])[0] if whale.labels else None,
+            },
+            "summary": summary,
+            "value_usd": value_usd or 0.0,
+            "tx_hash": tx_hash,
+            "details": {},
+        }
+        self._schedule_broadcast(msg)
+
+    def _schedule_broadcast(self, msg: dict) -> None:
+        try:
+            if self._loop and self._loop.is_running():
+                self._loop.call_soon_threadsafe(asyncio.create_task, broadcast_manager.broadcast(msg))
         except Exception:
-            pass
+            logger.debug("Bitcoin broadcast scheduling failed", exc_info=True)
 
 
 EXCHANGE_ADDRESSES = {

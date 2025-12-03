@@ -18,6 +18,7 @@ export const mockDashboardSummary: DashboardSummary = {
 
 export const mockTopWhales: WhaleSummary[] = [
   {
+    id: 'mock-1',
     address: '0x742d35Cc6634C0532925a3b844Bc454e4438f44e',
     chain: 'ethereum',
     type: 'holder_trader',
@@ -32,6 +33,7 @@ export const mockTopWhales: WhaleSummary[] = [
     last_active_at: '2025-12-03T08:45:00Z'
   },
   {
+    id: 'mock-2',
     address: '0x8894E0a0c962CB723c1976a4421c95949bE2D4E3',
     chain: 'ethereum',
     type: 'trader',
@@ -46,6 +48,7 @@ export const mockTopWhales: WhaleSummary[] = [
     last_active_at: '2025-12-03T09:12:00Z'
   },
   {
+    id: 'mock-3',
     address: 'bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh',
     chain: 'bitcoin',
     type: 'holder',
@@ -60,6 +63,7 @@ export const mockTopWhales: WhaleSummary[] = [
     last_active_at: '2025-12-02T22:30:00Z'
   },
   {
+    id: 'mock-4',
     address: '0x1234567890123456789012345678901234567890',
     chain: 'ethereum',
     type: 'holder_trader',
@@ -74,6 +78,7 @@ export const mockTopWhales: WhaleSummary[] = [
     last_active_at: '2025-12-03T09:30:00Z'
   },
   {
+    id: 'mock-5',
     address: '0xABCDEF1234567890ABCDEF1234567890ABCDEF12',
     chain: 'ethereum',
     type: 'trader',
@@ -88,6 +93,7 @@ export const mockTopWhales: WhaleSummary[] = [
     last_active_at: '2025-12-03T09:28:00Z'
   },
   {
+    id: 'mock-6',
     address: 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq',
     chain: 'bitcoin',
     type: 'holder',
@@ -102,6 +108,7 @@ export const mockTopWhales: WhaleSummary[] = [
     last_active_at: '2025-12-01T18:00:00Z'
   },
   {
+    id: 'mock-7',
     address: '0x9876543210987654321098765432109876543210',
     chain: 'ethereum',
     type: 'holder_trader',
@@ -116,6 +123,7 @@ export const mockTopWhales: WhaleSummary[] = [
     last_active_at: '2025-12-03T07:15:00Z'
   },
   {
+    id: 'mock-8',
     address: '0xFEDCBA0987654321FEDCBA0987654321FEDCBA09',
     chain: 'ethereum',
     type: 'trader',

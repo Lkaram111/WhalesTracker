@@ -10,10 +10,11 @@ import { PortfolioChart } from '@/components/domain/charts/PortfolioChart';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ArrowLeft, MessageSquare } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import type { ChainId, Trade, WalletDetails, OpenPosition } from '@/types/api';
+import type { BackfillStatus, ChainId, Trade, WalletDetails, OpenPosition } from '@/types/api';
 import { api } from '@/lib/apiClient';
 import { formatUSDExact } from '@/lib/formatters';
 import { Button } from '@/components/ui/button';
+import { aggregateTrades } from '@/lib/tradeGrouping';
 
 export default function WhaleDetail() {
   const { chain, address } = useParams<{ chain: ChainId; address: string }>();
@@ -29,6 +30,63 @@ export default function WhaleDetail() {
   const [positions, setPositions] = useState<OpenPosition[]>([]);
   const [roiHistory, setRoiHistory] = useState<{ timestamp: string; roi_percent: number }[]>([]);
   const [portfolioHistory, setPortfolioHistory] = useState<{ timestamp: string; value_usd: number }[]>([]);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const [whaleId, setWhaleId] = useState<string | null>(null);
+  const [backfillStatus, setBackfillStatus] = useState<BackfillStatus | null>(null);
+  const [resetting, setResetting] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [groupSimilarTrades, setGroupSimilarTrades] = useState(false);
+
+  const fillDailySeries = <T extends { timestamp: string }>(
+    points: T[],
+    days: number,
+    valueKey: keyof T,
+    defaultValue: number = 0
+  ) => {
+    const sorted = [...points].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+    const byDate = new Map<string, T>();
+    sorted.forEach((p) => {
+      const key = new Date(p.timestamp).toISOString().slice(0, 10);
+      byDate.set(key, p);
+    });
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const start = new Date(today);
+    start.setDate(start.getDate() - days);
+
+    const filled: T[] = [];
+    let lastValue =
+      sorted.length > 0 && typeof sorted[0][valueKey] === 'number'
+        ? (sorted[0][valueKey] as number)
+        : defaultValue;
+
+    for (
+      const cursor = new Date(start);
+      cursor.getTime() <= today.getTime();
+      cursor.setDate(cursor.getDate() + 1)
+    ) {
+      const key = cursor.toISOString().slice(0, 10);
+      const match = byDate.get(key);
+      if (match) {
+        const val = match[valueKey];
+        if (typeof val === 'number') {
+          lastValue = val;
+        }
+        filled.push({ ...match, timestamp: new Date(key).toISOString() });
+      } else {
+        filled.push({
+          ...(sorted[0] || { timestamp: cursor.toISOString() }),
+          timestamp: cursor.toISOString(),
+          [valueKey]: lastValue,
+        } as T);
+      }
+    }
+    return filled;
+  };
 
   const rangeOptions = [
     { label: '7d', value: 7 },
@@ -45,8 +103,16 @@ export default function WhaleDetail() {
 
   useEffect(() => {
     if (!chain || !address) return;
-    api.getWalletDetails(chain, address).then(setWalletDetails).catch(() => setWalletDetails(null));
-  }, [chain, address]);
+    api
+      .getWalletDetails(chain, address)
+      .then((data) => {
+        setWalletDetails(data);
+        if (data.wallet?.id) {
+          setWhaleId(data.wallet.id);
+        }
+      })
+      .catch(() => setWalletDetails(null));
+  }, [chain, address, refreshKey]);
 
   useEffect(() => {
     if (!chain || !address) return;
@@ -63,27 +129,103 @@ export default function WhaleDetail() {
         setTradesNextCursor(null);
       })
       .finally(() => setTradesLoading(false));
-  }, [chain, address, tradeSource, tradeDirection]);
+  }, [chain, address, tradeSource, tradeDirection, refreshKey]);
 
   useEffect(() => {
     if (!chain || !address) return;
     api.getWalletPositions(chain, address)
       .then((res) => setPositions(res.items))
       .catch(() => setPositions([]));
-  }, [chain, address]);
+  }, [chain, address, refreshKey]);
 
   useEffect(() => {
     if (!chain || !address) return;
-    api.getWalletRoiHistory(chain, address, roiRange).then((res) => setRoiHistory(res.points)).catch(() => setRoiHistory([]));
-  }, [chain, address, roiRange]);
+    api
+      .getWalletRoiHistory(chain, address, roiRange)
+      .then((res) => setRoiHistory(fillDailySeries(res.points, roiRange, 'roi_percent', 0)))
+      .catch(() => setRoiHistory([]));
+  }, [chain, address, roiRange, refreshKey]);
 
   useEffect(() => {
     if (!chain || !address) return;
     api
       .getWalletPortfolioHistory(chain, address, portfolioRange)
-      .then((res) => setPortfolioHistory(res.points))
+      .then((res) => setPortfolioHistory(fillDailySeries(res.points, portfolioRange, 'value_usd', 0)))
       .catch(() => setPortfolioHistory([]));
-  }, [chain, address, portfolioRange]);
+  }, [chain, address, portfolioRange, refreshKey]);
+
+  useEffect(() => {
+    if (!chain || !address) return;
+    const params = new URLSearchParams();
+    params.set('search', address);
+    params.set('limit', '5');
+    params.set('chain', chain);
+    api
+      .getWhales(params)
+      .then((res) => {
+        const match = res.items.find(
+          (w) => w.chain === chain && w.address.toLowerCase() === address.toLowerCase()
+        );
+        setWhaleId(match ? match.id : null);
+      })
+      .catch(() => setWhaleId((prev) => prev || null));
+  }, [chain, address]);
+
+  // Fallback resolve if id still missing
+  useEffect(() => {
+    if (!chain || !address) return;
+    if (whaleId) return;
+    api
+      .resolveWhale(chain, address)
+      .then((res) => setWhaleId(res.whale_id))
+      .catch(() => {});
+  }, [chain, address]);
+
+  // Poll backfill/reset status when requested
+  useEffect(() => {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    const shouldPoll =
+      chain === 'hyperliquid' &&
+      whaleId &&
+      (resetting || (backfillStatus && backfillStatus.status === 'running'));
+    if (!shouldPoll) {
+      return () => undefined;
+    }
+    const poll = async () => {
+      try {
+        const status = await api.getBackfillStatus(whaleId!);
+        if (cancelled) return;
+        setBackfillStatus(status);
+        if (status.status === 'done' || status.status === 'error') {
+          setResetting(false);
+          setRefreshKey((k) => k + 1);
+          return;
+        }
+      } catch {
+        if (cancelled) return;
+      }
+      timeout = setTimeout(poll, 2000);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      if (timeout) clearTimeout(timeout);
+    };
+  }, [chain, whaleId, resetting, backfillStatus?.status]);
+
+  const handleReset = async () => {
+    if (!whaleId || chain !== 'hyperliquid') return;
+    setResetError(null);
+    setResetting(true);
+    try {
+      const status = await api.resetHyperliquid(whaleId);
+      setBackfillStatus(status);
+    } catch (err) {
+      setResetError(err instanceof Error ? err.message : 'Failed to start reset');
+      setResetting(false);
+    }
+  };
 
   const loadMoreTrades = () => {
     if (!chain || !address || !tradesNextCursor || tradesLoading) return;
@@ -99,6 +241,10 @@ export default function WhaleDetail() {
       .finally(() => setTradesLoading(false));
   };
   const openTrades = positions;
+  const displayedTrades = useMemo(
+    () => (groupSimilarTrades ? aggregateTrades(trades) : trades),
+    [trades, groupSimilarTrades]
+  );
 
   if (!chain || !address) {
     return (
@@ -129,6 +275,46 @@ export default function WhaleDetail() {
 
       {/* Wallet Header */}
       <WalletHeader wallet={walletDetails.wallet} />
+
+      {chain === 'hyperliquid' && (
+        <div className="card-glass rounded-xl p-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-foreground">Reset & re-import Hyperliquid data</h3>
+              <p className="text-xs text-muted-foreground">
+                Clears trades, holdings, and metrics for this wallet, then re-imports history. Progress is reported below.
+              </p>
+            </div>
+            <Button
+              size="sm"
+              onClick={handleReset}
+              disabled={!whaleId || resetting}
+              variant="outline"
+            >
+              {resetting ? 'Resetting...' : 'Reset & Re-import'}
+            </Button>
+          </div>
+          {resetError && <p className="text-xs text-destructive">{resetError}</p>}
+          {backfillStatus ? (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <span>{backfillStatus.message || backfillStatus.status}</span>
+                <span className="font-medium text-foreground">{Math.round(backfillStatus.progress)}%</span>
+              </div>
+              <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-primary transition-all"
+                  style={{ width: `${Math.max(0, Math.min(100, backfillStatus.progress))}%` }}
+                />
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              {whaleId ? 'Progress will appear once a reset starts.' : 'Resolving wallet id...'}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Metrics Grid */}
       <WalletMetricsGrid metrics={walletDetails.metrics} />
@@ -292,9 +478,17 @@ export default function WhaleDetail() {
                 ))}
               </TabsList>
             </Tabs>
+            <Button
+              variant={groupSimilarTrades ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setGroupSimilarTrades((prev) => !prev)}
+              className="w-full sm:w-auto"
+            >
+              {groupSimilarTrades ? 'Ungroup partial fills' : 'Group partial fills'}
+            </Button>
           </div>
         </div>
-        <TradesTable trades={trades} />
+        <TradesTable trades={displayedTrades} groupingEnabled={groupSimilarTrades} />
         <div className="flex justify-center">
           {tradesNextCursor ? (
             <Button variant="outline" size="sm" onClick={loadMoreTrades} disabled={tradesLoading}>

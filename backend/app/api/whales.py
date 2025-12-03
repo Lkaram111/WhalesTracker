@@ -1,15 +1,33 @@
 from datetime import datetime, timedelta, timezone
+import asyncio
 
 from fastapi import APIRouter, Query, HTTPException
 from sqlalchemy import and_, func, or_, select, String, cast
 
 from app.db.session import SessionLocal
-from app.models import Chain, CurrentWalletMetrics, Whale, WhaleType
-from app.schemas.api import ListResponse, WhaleSummary, WhaleCreateRequest
+from app.models import (
+    Chain,
+    CurrentWalletMetrics,
+    IngestionCheckpoint,
+    Event,
+    Holding,
+    Trade,
+    WalletMetricsDaily,
+    Whale,
+    WhaleType,
+)
+from app.schemas.api import (
+    BackfillStatus,
+    ResolveWhaleResponse,
+    ListResponse,
+    WhaleSummary,
+    WhaleCreateRequest,
+)
+from app.services.backfill_progress import backfill_progress
+from app.services.backfill_service import backfill_wallet_history
 from app.services.hyperliquid_client import hyperliquid_client
 from app.services.metrics_service import recompute_wallet_metrics
 from app.services.holdings_service import refresh_holdings_for_whales
-from app.workers.hyperliquid_ingestor import HyperliquidIngestor
 
 router = APIRouter()
 
@@ -102,6 +120,7 @@ async def list_whales(
             )
             items.append(
                 WhaleSummary(
+                    id=whale.id,
                     address=whale.address,
                     chain=chain_obj.slug,  # type: ignore[arg-type]
                     type=whale_type,
@@ -174,25 +193,14 @@ async def create_whale(payload: WhaleCreateRequest) -> WhaleSummary:
             labels=labels,
         )
         session.add(whale)
-        session.flush()
-
-        if chain_slug == "hyperliquid":
-            # Synchronously ingest Hyperliquid trades/positions for newly added wallet
-            ingestor = HyperliquidIngestor(poll_interval=300.0)
-            try:
-                ingestor._process_account(session, chain.id, whale)  # populate trades/positions immediately
-            except Exception:
-                pass
-        else:
-            # Refresh holdings for ETH/BTC
-            refresh_holdings_for_whales(session, [whale])
-
-        recompute_wallet_metrics(session, whale)
         session.commit()
 
-        # reload metrics
+        # Kick off backfill in background thread to avoid blocking the API
+        asyncio.create_task(_run_backfill_async(whale.id))
+
         metrics = session.get(CurrentWalletMetrics, whale.id)
         return WhaleSummary(
+            id=whale.id,
             address=whale.address,
             chain=chain.slug,  # type: ignore[arg-type]
             type=whale.type.value if hasattr(whale.type, "value") else whale.type,
@@ -206,3 +214,138 @@ async def create_whale(payload: WhaleCreateRequest) -> WhaleSummary:
             win_rate_percent=float(metrics.win_rate_percent) if metrics and metrics.win_rate_percent is not None else None,
             last_active_at=whale.last_active_at or whale.first_seen_at or datetime.now(timezone.utc),
         )
+
+
+@router.get("/{whale_id}/backfill_status", response_model=BackfillStatus)
+async def whale_backfill_status(whale_id: str) -> BackfillStatus:
+    status = backfill_progress.get(whale_id)
+    if status:
+        return BackfillStatus(**status)
+    return BackfillStatus(
+        whale_id=whale_id,
+        status="idle",
+        progress=100.0,
+        message="idle",
+        updated_at=datetime.now(timezone.utc),
+    )
+
+
+async def _run_backfill_async(whale_id: str) -> None:
+    await asyncio.to_thread(_run_backfill_sync, whale_id)
+
+
+def _run_backfill_sync(whale_id: str) -> None:
+    with SessionLocal() as session:
+        whale = session.get(Whale, whale_id)
+        if not whale:
+            return
+        chain = session.get(Chain, whale.chain_id)
+        chain_slug = chain.slug if chain else None
+        backfill_progress.start(whale.id, chain_slug)
+
+        def progress_cb(pct: float, message: str | None = None) -> None:
+            backfill_progress.update(whale.id, pct, message)
+
+        try:
+            backfilled = backfill_wallet_history(session, whale, progress_cb=progress_cb)
+            if chain and chain.slug != "hyperliquid":
+                refresh_holdings_for_whales(session, [whale])
+                recompute_wallet_metrics(session, whale)
+            session.commit()
+            backfill_progress.finish(
+                whale.id,
+                success=bool(backfilled),
+                message="completed" if backfilled else "no history found or fetch failed",
+            )
+        except Exception as exc:
+            session.rollback()
+            backfill_progress.error(whale.id, f"error: {exc}")
+
+
+@router.get("/resolve", response_model=ResolveWhaleResponse)
+async def resolve_whale(chain: str, address: str) -> ResolveWhaleResponse:
+    with SessionLocal() as session:
+        chain_obj = session.scalar(select(Chain).where(Chain.slug == chain.lower()))
+        if not chain_obj:
+            raise HTTPException(status_code=404, detail="Chain not found")
+        whale = session.scalar(
+            select(Whale).where(Whale.chain_id == chain_obj.id, func.lower(Whale.address) == address.lower())
+        )
+        if not whale:
+            raise HTTPException(status_code=404, detail="Whale not found")
+        return ResolveWhaleResponse(whale_id=whale.id)
+
+
+@router.post("/{whale_id}/reset_hyperliquid", response_model=BackfillStatus)
+async def reset_hyperliquid_wallet(whale_id: str) -> BackfillStatus:
+    """Delete all data for a Hyperliquid wallet and re-import in background."""
+    with SessionLocal() as session:
+        whale = session.get(Whale, whale_id)
+        if not whale:
+            raise HTTPException(status_code=404, detail="Whale not found")
+        chain = session.get(Chain, whale.chain_id)
+        if not chain or chain.slug != "hyperliquid":
+            raise HTTPException(status_code=400, detail="Reset allowed only for Hyperliquid wallets")
+
+    asyncio.create_task(_reset_hyperliquid_async(whale_id))
+    now = datetime.now(timezone.utc)
+    return BackfillStatus(
+        whale_id=whale_id,
+        chain="hyperliquid",
+        status="running",
+        progress=0.0,
+        message="reset queued",
+        updated_at=now,
+    )
+
+
+async def _reset_hyperliquid_async(whale_id: str) -> None:
+    await asyncio.to_thread(_reset_hyperliquid_sync, whale_id)
+
+
+def _reset_hyperliquid_sync(whale_id: str) -> None:
+    with SessionLocal() as session:
+        whale = session.get(Whale, whale_id)
+        if not whale:
+            return
+        chain = session.get(Chain, whale.chain_id)
+        if not chain or chain.slug != "hyperliquid":
+            return
+
+        backfill_progress.start(whale.id, chain.slug)
+        try:
+            # Wipe related data
+            session.query(Trade).filter(Trade.whale_id == whale.id).delete(synchronize_session=False)
+            session.query(Event).filter(Event.whale_id == whale.id).delete(synchronize_session=False)
+            session.query(Holding).filter(Holding.whale_id == whale.id).delete(synchronize_session=False)
+            session.query(WalletMetricsDaily).filter(WalletMetricsDaily.whale_id == whale.id).delete(
+                synchronize_session=False
+            )
+            session.query(CurrentWalletMetrics).filter(CurrentWalletMetrics.whale_id == whale.id).delete(
+                synchronize_session=False
+            )
+            session.query(IngestionCheckpoint).filter(IngestionCheckpoint.whale_id == whale.id).delete(
+                synchronize_session=False
+            )
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            backfill_progress.error(whale.id, f"error during reset: {exc}")
+            return
+
+        def progress_cb(pct: float, message: str | None = None) -> None:
+            backfill_progress.update(whale.id, pct, message)
+
+        try:
+            backfilled = backfill_wallet_history(session, whale, progress_cb=progress_cb)
+            refresh_holdings_for_whales(session, [whale])
+            recompute_wallet_metrics(session, whale)
+            session.commit()
+            backfill_progress.finish(
+                whale.id,
+                success=bool(backfilled),
+                message="reset completed" if backfilled else "reset completed (no history fetched)",
+            )
+        except Exception as exc:
+            session.rollback()
+            backfill_progress.error(whale.id, f"error during backfill: {exc}")

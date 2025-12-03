@@ -21,9 +21,12 @@ class BitcoinClient:
             resp.raise_for_status()
             return resp.json()
 
-    def get_address_txs(self, address: str, limit: int = 25) -> list[dict[str, Any]]:
+    def get_address_txs(self, address: str, limit: int = 25, offset: int = 0) -> list[dict[str, Any]]:
         with self._client() as client:
-            resp = client.get(f"/address/{address}/txs", params={"limit": limit})
+            params = {"limit": limit}
+            if offset:
+                params["offset"] = offset
+            resp = client.get(f"/address/{address}/txs", params=params)
             resp.raise_for_status()
             return resp.json()
 

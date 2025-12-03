@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import logging
+
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.db.session import SessionLocal
@@ -11,22 +13,44 @@ from app.services.metrics_service import recompute_all_wallet_metrics
 from app.services.price_updater import update_prices
 from app.workers.classifier import classifier
 
+logger = logging.getLogger(__name__)
+
 
 def _refresh_holdings_and_metrics() -> None:
+    started = datetime.now()
+    logger.info("scheduler: refresh_holdings_and_metrics start")
     try:
         with SessionLocal() as session:
             whales = session.query(Whale).all()
             refresh_holdings_for_whales(session, whales)
             recompute_all_wallet_metrics(session)
     except Exception:
+        logger.exception("scheduler: refresh_holdings_and_metrics failed")
         return
+    logger.info("scheduler: refresh_holdings_and_metrics done in %.2fs", (datetime.now() - started).total_seconds())
 
 
 def _classify_whales() -> None:
+    started = datetime.now()
+    logger.info("scheduler: classify_whales start")
     try:
         classifier.run()
     except Exception:
+        logger.exception("scheduler: classify_whales failed")
         return
+    logger.info("scheduler: classify_whales done in %.2fs", (datetime.now() - started).total_seconds())
+
+
+def _update_prices_job() -> None:
+    started = datetime.now()
+    logger.info("scheduler: update_prices start")
+    try:
+        with SessionLocal() as session:
+            update_prices(session)
+    except Exception:
+        logger.exception("scheduler: update_prices failed")
+        return
+    logger.info("scheduler: update_prices done in %.2fs", (datetime.now() - started).total_seconds())
 
 
 def start_scheduler() -> BackgroundScheduler:
@@ -41,7 +65,7 @@ def start_scheduler() -> BackgroundScheduler:
         coalesce=True,
     )
     scheduler.add_job(
-        update_prices,
+        _update_prices_job,
         "interval",
         minutes=30,
         next_run_time=datetime.now(),

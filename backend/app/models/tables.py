@@ -19,6 +19,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Index,
+    BigInteger,
 )
 from sqlalchemy.orm import declarative_mixin, declared_attr
 
@@ -198,3 +199,13 @@ class PriceHistory(Base):
     asset_symbol = Column(String(64), nullable=False)
     timestamp = Column(DateTime(timezone=True), nullable=False)
     price_usd = Column(Numeric(30, 10), nullable=True)
+
+
+class IngestionCheckpoint(Base, TimestampMixin):
+    __tablename__ = "ingestion_checkpoints"
+    __table_args__ = (UniqueConstraint("whale_id", name="uq_ingestion_checkpoint_whale"),)
+
+    whale_id = Column(String(36), ForeignKey("whales.id", ondelete="CASCADE"), primary_key=True)
+    chain_slug = Column(String(64), nullable=False)
+    last_fill_time = Column(BigInteger, nullable=True)  # ms epoch of latest ingested fill
+    last_position_time = Column(DateTime(timezone=True), nullable=True)

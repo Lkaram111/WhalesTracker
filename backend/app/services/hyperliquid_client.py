@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from typing import Any
+import threading
+import time
 
 import httpx
+from httpx import HTTPStatusError, RequestError
 
 from app.core.config import settings
 
@@ -12,26 +15,72 @@ class HyperliquidClient:
         # Accept either full /info URL or host; normalize to host and always POST to /info
         self.base_url = (base_url or settings.hyperliquid_info_url).rstrip("/info").rstrip("/")
         self.timeout = timeout
+        self.max_rps = max(0.1, float(getattr(settings, "hyperliquid_max_rps", 3.0) or 3.0))
+        self._min_interval = 1.0 / self.max_rps
+        self._last_request_ts = 0.0
+        self._lock = threading.Lock()
+        self._max_retries = 3
 
     def _client(self) -> httpx.Client:
         return httpx.Client(base_url=self.base_url, timeout=self.timeout)
 
+    def _throttle(self) -> None:
+        if self._min_interval <= 0:
+            return
+        with self._lock:
+            now = time.perf_counter()
+            sleep_for = self._min_interval - (now - self._last_request_ts)
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            self._last_request_ts = time.perf_counter()
+
+    @staticmethod
+    def _retry_after_seconds(headers: httpx.Headers) -> float:
+        try:
+            return float(headers.get("Retry-After", "0") or 0)
+        except Exception:
+            return 0.0
+
+    def _post_info(self, payload: dict[str, Any]) -> Any:
+        """POST to /info with global rate limiting and limited retries on 429/5xx."""
+        last_err: Exception | None = None
+        for attempt in range(1, self._max_retries + 1):
+            self._throttle()
+            try:
+                with self._client() as client:
+                    resp = client.post("/info", json=payload)
+                resp.raise_for_status()
+                return resp.json()
+            except HTTPStatusError as exc:  # noqa: PERF203
+                status = exc.response.status_code
+                retry_after = self._retry_after_seconds(exc.response.headers)
+                last_err = exc
+                if status in (429, 502, 503, 504) and attempt < self._max_retries:
+                    # Respect server-provided Retry-After if present; otherwise exponential backoff.
+                    delay = max(retry_after, min(30.0, 2.0**attempt))
+                    time.sleep(delay)
+                    continue
+                raise
+            except RequestError as exc:
+                last_err = exc
+                if attempt < self._max_retries:
+                    time.sleep(min(30.0, 2.0**attempt))
+                    continue
+                raise
+        if last_err:
+            raise last_err
+
     def get_clearinghouse_state(self, address: str) -> dict[str, Any]:
         payload = {"type": "clearinghouseState", "user": address}
-        with self._client() as client:
-            resp = client.post("/info", json=payload)
-            resp.raise_for_status()
-            return resp.json()
+        data = self._post_info(payload)
+        return data if isinstance(data, dict) else {}
 
     def get_user_fills(self, address: str, start_time: int | None = None) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {"type": "userFills", "user": address}
         if start_time is not None:
             payload["startTime"] = start_time
-        with self._client() as client:
-            resp = client.post("/info", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            return data if isinstance(data, list) else []
+        data = self._post_info(payload)
+        return data if isinstance(data, list) else []
 
     def get_user_fills_paginated(
         self,
@@ -67,10 +116,8 @@ class HyperliquidClient:
             payload["startTime"] = start_time
         if end_time is not None:
             payload["endTime"] = end_time
-        with self._client() as client:
-            resp = client.post("/info", json=payload)
-            resp.raise_for_status()
-            return resp.json()
+        data = self._post_info(payload)
+        return data if isinstance(data, dict) else {}
 
 
 hyperliquid_client = HyperliquidClient()

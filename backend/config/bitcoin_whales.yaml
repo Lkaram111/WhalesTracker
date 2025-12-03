@@ -23,10 +23,3 @@
   labels: ["exchange", "robinhood", "custodial"]
 - address: "bc1qd4ysezhmypwty5dnw7c8nqy5h5nxg0xqsvaefd0qn5kq32vwnwqqgv4rzr"  # Large unlabeled custodial/cluster wallet
   labels: ["custodial", "whale"]
-
-# === Dormant / OG / special wallets ===
-
-- address: "1FeexV6bAHb8ybZjqQMJircCrHGW9sb6uF"  # ~80k BTC dormant since 2011, widely tracked "1Feex" whale
-  labels: ["dormant", "whale", "suspected_hack"]
-- address: "1LdRcdxfbSnmCYYNdeYpUnztiYzvfBEQeC"  # Large dormant wallet (50k+ BTC, never spent)
-  labels: ["dormant", "whale"]

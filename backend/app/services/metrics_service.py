@@ -5,6 +5,8 @@ from decimal import Decimal
 from typing import Iterable
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
+import time
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -205,7 +207,13 @@ def recompute_wallet_metrics(session: Session, whale: Whale) -> None:
                 else 0.0
             )
 
-    metrics = session.get(CurrentWalletMetrics, whale.id)
+    # Avoid double-inserting metrics when recompute is called multiple times in one transaction
+    metrics = next(
+        (m for m in session.new if isinstance(m, CurrentWalletMetrics) and m.whale_id == whale.id),
+        None,
+    )
+    if not metrics:
+        metrics = session.get(CurrentWalletMetrics, whale.id)
     if metrics:
         metrics.portfolio_value_usd = portfolio_value
         metrics.roi_percent = roi_percent
@@ -229,8 +237,17 @@ def recompute_wallet_metrics(session: Session, whale: Whale) -> None:
         )
 
     today = date.today()
+    pending_daily = next(
+        (
+            d
+            for d in session.new
+            if isinstance(d, WalletMetricsDaily) and d.whale_id == whale.id and d.date == today
+        ),
+        None,
+    )
     existing_daily = (
-        session.query(WalletMetricsDaily)
+        pending_daily
+        or session.query(WalletMetricsDaily)
         .filter(WalletMetricsDaily.whale_id == whale.id, WalletMetricsDaily.date == today)
         .one_or_none()
     )
@@ -262,9 +279,76 @@ def recompute_all_wallet_metrics(session: Session) -> None:
     whales = session.query(Whale).all()
     for whale in whales:
         recompute_wallet_metrics(session, whale)
-    session.commit()
+    _commit_with_retry(session)
 
 
 def touch_last_active(session: Session, whale: Whale, ts: datetime | None = None) -> None:
     whale.last_active_at = ts or datetime.now(timezone.utc)
     session.add(whale)
+
+
+def _commit_with_retry(session: Session, retries: int = 3, delay: float = 0.5) -> None:
+    for attempt in range(retries):
+        try:
+            session.commit()
+            return
+        except OperationalError:
+            session.rollback()
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay)
+
+
+def rebuild_portfolio_history_from_trades(session: Session, whale: Whale) -> None:
+    """Populate WalletMetricsDaily rows from historical trades for charting."""
+    trades = (
+        session.query(Trade)
+        .filter(Trade.whale_id == whale.id, Trade.timestamp.isnot(None))
+        .order_by(Trade.timestamp.asc(), Trade.id.asc())
+        .all()
+    )
+    if not trades:
+        return
+    daily: dict[date, dict[str, Decimal | int]] = {}
+    cumulative = Decimal(0)
+    for t in trades:
+        if t.value_usd is None:
+            continue
+        trade_date = t.timestamp.date()
+        stats = daily.setdefault(
+            trade_date, {"volume": Decimal(0), "trades": 0, "portfolio": None}
+        )
+        stats["volume"] += Decimal(t.value_usd)
+        stats["trades"] += 1
+        cumulative += Decimal(t.value_usd)
+        stats["portfolio"] = cumulative
+
+    for d, stats in daily.items():
+        existing = (
+            session.query(WalletMetricsDaily)
+            .filter(WalletMetricsDaily.whale_id == whale.id, WalletMetricsDaily.date == d)
+            .one_or_none()
+        )
+        portfolio_val = float(stats.get("portfolio") or 0)
+        if existing:
+            existing.portfolio_value_usd = portfolio_val
+            existing.volume_1d_usd = float(stats.get("volume") or 0)
+            existing.trades_1d = int(stats.get("trades") or 0)
+            existing.roi_percent = existing.roi_percent or 0.0
+            existing.realized_pnl_usd = existing.realized_pnl_usd or 0.0
+            existing.unrealized_pnl_usd = existing.unrealized_pnl_usd or 0.0
+        else:
+            session.add(
+                WalletMetricsDaily(
+                    whale_id=whale.id,
+                    date=d,
+                    portfolio_value_usd=portfolio_val,
+                    roi_percent=0.0,
+                    realized_pnl_usd=0.0,
+                    unrealized_pnl_usd=0.0,
+                    volume_1d_usd=float(stats.get("volume") or 0),
+                    trades_1d=int(stats.get("trades") or 0),
+                    win_rate_percent=None,
+                )
+            )
+    session.flush()
