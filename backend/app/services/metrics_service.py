@@ -31,8 +31,8 @@ def _safe_sum(values: Iterable[Decimal | None]) -> Decimal:
     return total
 
 
-def _volume_and_count_last_30d(session: Session, whale_id: str) -> tuple[Decimal, int]:
-    window_start = datetime.now(timezone.utc) - timedelta(days=30)
+def _volume_and_count_last_30d(session: Session, whale_id: str, days: int = 30) -> tuple[Decimal, int]:
+    window_start = datetime.now(timezone.utc) - timedelta(days=days)
     trades = (
         session.query(Trade.value_usd)
         .filter(Trade.whale_id == whale_id, Trade.timestamp >= window_start)
@@ -147,6 +147,7 @@ def recompute_wallet_metrics(session: Session, whale: Whale) -> None:
     portfolio_value = _safe_sum(h.value_usd for h in holdings)
 
     volume_30d, trades_30d = _volume_and_count_last_30d(session, whale.id)
+    volume_1d, trades_1d = _volume_and_count_last_30d(session, whale.id, days=1)
 
     positions: dict[str, dict[str, Decimal]] = {}
     realized_from_sales = Decimal(0)
@@ -189,9 +190,9 @@ def recompute_wallet_metrics(session: Session, whale: Whale) -> None:
             except Exception:
                 account_value = Decimal(portfolio_value)
             try:
-                total_margin_used = Decimal(margin.get("totalMarginUsed", "0"))
+                withdrawable = Decimal(state.get("withdrawable") or 0)
             except Exception:
-                total_margin_used = Decimal(0)
+                withdrawable = Decimal(0)
             positions_raw = state.get("assetPositions") if isinstance(state.get("assetPositions"), list) else []
             unrealized_positions = []
             for pos in positions_raw:
@@ -202,12 +203,15 @@ def recompute_wallet_metrics(session: Session, whale: Whale) -> None:
                     pass
             unrealized_pnl = sum(unrealized_positions, Decimal(0))
             portfolio_value = float(account_value)
-            cost_basis_total = total_margin_used if total_margin_used else Decimal(0)
-            roi_percent = (
-                float(account_value - cost_basis_total) / float(cost_basis_total) * 100
-                if cost_basis_total > 0
-                else 0.0
-            )
+            total_pnl = realized_pnl + unrealized_pnl
+            cost_basis_total = account_value - total_pnl
+            if withdrawable > 0:
+                cost_basis_total = max(cost_basis_total, withdrawable)
+            if cost_basis_total > 0:
+                roi_percent = float(total_pnl / cost_basis_total) * 100
+            else:
+                cost_basis_total = Decimal(0)
+                roi_percent = 0.0
 
     _upsert_current_metrics(
         session,
@@ -243,8 +247,8 @@ def recompute_wallet_metrics(session: Session, whale: Whale) -> None:
         existing_daily.roi_percent = roi_percent
         existing_daily.realized_pnl_usd = realized_pnl
         existing_daily.unrealized_pnl_usd = unrealized_pnl
-        existing_daily.volume_1d_usd = volume_30d
-        existing_daily.trades_1d = trades_30d
+        existing_daily.volume_1d_usd = volume_1d
+        existing_daily.trades_1d = trades_1d
         existing_daily.win_rate_percent = win_rate_percent
     else:
         session.add(
@@ -255,8 +259,8 @@ def recompute_wallet_metrics(session: Session, whale: Whale) -> None:
                 roi_percent=roi_percent,
                 realized_pnl_usd=realized_pnl,
                 unrealized_pnl_usd=unrealized_pnl,
-                volume_1d_usd=volume_30d,
-                trades_1d=trades_30d,
+                volume_1d_usd=volume_1d,
+                trades_1d=trades_1d,
                 win_rate_percent=win_rate_percent,
             )
         )
@@ -313,6 +317,8 @@ def _commit_with_retry(session: Session, retries: int = 3, delay: float = 0.5) -
 
 def rebuild_portfolio_history_from_trades(session: Session, whale: Whale) -> None:
     """Populate WalletMetricsDaily rows from historical trades for charting."""
+    chain = session.get(Chain, whale.chain_id)
+    is_hyperliquid = chain is not None and chain.slug == "hyperliquid"
     trades = (
         session.query(Trade)
         .filter(Trade.whale_id == whale.id, Trade.timestamp.isnot(None))
@@ -320,6 +326,9 @@ def rebuild_portfolio_history_from_trades(session: Session, whale: Whale) -> Non
         .all()
     )
     if not trades:
+        return
+    if is_hyperliquid:
+        _rebuild_hyperliquid_history(session, whale, trades)
         return
     daily: dict[date, dict[str, Decimal | int]] = {}
     cumulative = Decimal(0)
@@ -358,6 +367,103 @@ def rebuild_portfolio_history_from_trades(session: Session, whale: Whale) -> Non
                     roi_percent=0.0,
                     realized_pnl_usd=0.0,
                     unrealized_pnl_usd=0.0,
+                    volume_1d_usd=float(stats.get("volume") or 0),
+                    trades_1d=int(stats.get("trades") or 0),
+                    win_rate_percent=None,
+                )
+            )
+    session.flush()
+
+
+def _rebuild_hyperliquid_history(session: Session, whale: Whale, trades: list[Trade]) -> None:
+    """Approximate daily equity for Hyperliquid accounts from fills and live state."""
+    total_realized = _safe_sum(t.pnl_usd for t in trades if t.pnl_usd is not None)
+    latest_unrealized = Decimal(0)
+    withdrawable = Decimal(0)
+    account_value: Decimal | None = None
+
+    try:
+        state = hyperliquid_client.get_clearinghouse_state(whale.address)
+    except Exception:
+        state = None
+    if isinstance(state, dict):
+        margin = state.get("marginSummary") or {}
+        try:
+            account_value = Decimal(margin.get("accountValue", "0"))
+        except Exception:
+            account_value = None
+        positions_raw = state.get("assetPositions") if isinstance(state.get("assetPositions"), list) else []
+        unrealized_positions: list[Decimal] = []
+        for pos in positions_raw:
+            position = pos.get("position") or {}
+            try:
+                unrealized_positions.append(Decimal(position.get("unrealizedPnl", "0")))
+            except Exception:
+                pass
+        latest_unrealized = sum(unrealized_positions, Decimal(0))
+        try:
+            withdrawable = Decimal(state.get("withdrawable") or 0)
+        except Exception:
+            withdrawable = Decimal(0)
+
+    if account_value is None:
+        holdings = session.query(Holding).filter(Holding.whale_id == whale.id).all()
+        account_value = _safe_sum(h.value_usd for h in holdings)
+
+    cost_basis = account_value - total_realized - latest_unrealized
+    if withdrawable > 0:
+        cost_basis = max(cost_basis, withdrawable)
+    if cost_basis <= 0:
+        cost_basis = account_value if account_value and account_value > 0 else Decimal(0)
+    starting_equity = cost_basis if cost_basis > 0 else account_value or Decimal(0)
+
+    daily: dict[date, dict[str, Decimal | int]] = {}
+    cumulative_realized = Decimal(0)
+    for t in trades:
+        trade_date = t.timestamp.date()
+        stats = daily.setdefault(
+            trade_date, {"volume": Decimal(0), "trades": 0, "realized": Decimal(0)}
+        )
+        if t.value_usd is not None:
+            stats["volume"] += abs(Decimal(t.value_usd))
+        stats["trades"] += 1
+        if t.pnl_usd is not None:
+            cumulative_realized += Decimal(t.pnl_usd)
+        stats["realized"] = cumulative_realized
+
+    last_day = max(daily.keys()) if daily else None
+    for d in sorted(daily.keys()):
+        stats = daily[d]
+        realized_to_date = Decimal(stats.get("realized") or 0)
+        equity = starting_equity + realized_to_date if starting_equity is not None else realized_to_date
+        unrealized = latest_unrealized if last_day and d == last_day else Decimal(0)
+        equity_with_unrealized = equity + unrealized
+        roi_percent = (
+            float((equity_with_unrealized - cost_basis) / cost_basis * 100)
+            if cost_basis > 0
+            else 0.0
+        )
+        existing = (
+            session.query(WalletMetricsDaily)
+            .filter(WalletMetricsDaily.whale_id == whale.id, WalletMetricsDaily.date == d)
+            .one_or_none()
+        )
+        if existing:
+            existing.portfolio_value_usd = float(equity_with_unrealized)
+            existing.volume_1d_usd = float(stats.get("volume") or 0)
+            existing.trades_1d = int(stats.get("trades") or 0)
+            existing.roi_percent = roi_percent
+            existing.realized_pnl_usd = float(realized_to_date)
+            existing.unrealized_pnl_usd = float(unrealized)
+        else:
+            session.add(
+                WalletMetricsDaily(
+                    whale_id=whale.id,
+                    date=d,
+                    portfolio_value_usd=float(equity_with_unrealized),
+                    roi_percent=roi_percent,
+                    realized_pnl_usd=float(realized_to_date),
+                    unrealized_pnl_usd=float(unrealized),
                     volume_1d_usd=float(stats.get("volume") or 0),
                     trades_1d=int(stats.get("trades") or 0),
                     win_rate_percent=None,
