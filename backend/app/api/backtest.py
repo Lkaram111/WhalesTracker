@@ -3,6 +3,7 @@ from decimal import Decimal
 from typing import Iterable, Sequence
 
 import logging
+import time
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select, inspect
 from sqlalchemy.exc import OperationalError
@@ -29,7 +30,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _ensure_backtest_runs_table(session) -> bool:
+def _ensure_backtest_runs_table(session, retries: int = 3, delay: float = 1.0) -> bool:
     """Create backtest_runs table on the fly if migrations haven't been applied."""
     try:
         bind = session.get_bind()
@@ -38,8 +39,17 @@ def _ensure_backtest_runs_table(session) -> bool:
         inspector = inspect(bind)
         if inspector.has_table(BacktestRun.__tablename__):
             return False
-        BacktestRun.__table__.create(bind, checkfirst=True)
-        return True
+        for attempt in range(retries):
+            try:
+                BacktestRun.__table__.create(bind, checkfirst=True)
+                return True
+            except OperationalError as exc:
+                # Handle transient SQLite locks with a short backoff
+                if "database is locked" in str(exc).lower() and attempt < retries - 1:
+                    time.sleep(delay)
+                    continue
+                raise
+        return False
     except Exception as exc:  # best-effort guardrail; don't block backtests on failure
         logger.warning("ensure backtest_runs table failed: %s", exc)
         return False
@@ -453,15 +463,26 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
             session.commit()
         except OperationalError as exc:
             session.rollback()
-            if "no such table" in str(exc).lower() and "backtest_runs" in str(exc).lower():
-                created = _ensure_backtest_runs_table(session)
+            exc_str = str(exc).lower()
+            if "no such table" in exc_str and "backtest_runs" in exc_str:
+                created = _ensure_backtest_runs_table(session, retries=3, delay=1.5)
                 if created:
-                    session.add(run_record)
-                    session.commit()
-                    logger.info("Created missing backtest_runs table and retried commit")
+                    try:
+                        session.add(run_record)
+                        session.commit()
+                        logger.info("Created missing backtest_runs table and retried commit")
+                    except OperationalError as exc_retry:
+                        session.rollback()
+                        if "database is locked" in str(exc_retry).lower():
+                            logger.warning(
+                                "Could not persist backtest run due to SQLite lock after creating table; skipping persistence"
+                            )
+                        else:
+                            raise
                 else:
-                    logger.error("backtest_runs table missing and automatic creation failed")
-                    raise
+                    logger.error("backtest_runs table missing and automatic creation failed; skipping persistence")
+            elif "database is locked" in exc_str:
+                logger.warning("Could not persist backtest run due to SQLite lock; skipping persistence")
             else:
                 raise
         except Exception:
