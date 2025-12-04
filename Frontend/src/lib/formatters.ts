@@ -45,9 +45,15 @@ export const formatAddress = (address: string, chars: number = 6): string => {
   return `${address.slice(0, chars)}...${address.slice(-chars)}`;
 };
 
+const parseTimestamp = (timestamp: string): Date => {
+  // If no timezone info, assume UTC to avoid local misinterpretation
+  const hasTz = /[zZ]|[+-]\d\d:?\d\d$/.test(timestamp);
+  return new Date(hasTz ? timestamp : `${timestamp}Z`);
+};
+
 export const formatTimeAgo = (timestamp: string): string => {
   const now = new Date();
-  const date = new Date(timestamp);
+  const date = parseTimestamp(timestamp);
   const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
 
   if (seconds < 60) return `${seconds}s ago`;
@@ -62,12 +68,12 @@ export const formatTimeAgo = (timestamp: string): string => {
 };
 
 export const formatDate = (timestamp: string): string => {
-  return new Date(timestamp).toLocaleDateString('en-US', {
+  return parseTimestamp(timestamp).toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',
     year: 'numeric',
     hour: '2-digit',
-    minute: '2-digit'
+    minute: '2-digit',
   });
 };
 
