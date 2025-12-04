@@ -22,6 +22,8 @@ from app.schemas.api import (
     ListResponse,
     WhaleSummary,
     WhaleCreateRequest,
+    WhaleUpdateRequest,
+    DeleteResponse,
 )
 from app.services.backfill_progress import backfill_progress
 from app.services.backfill_service import backfill_wallet_history
@@ -215,6 +217,48 @@ async def create_whale(payload: WhaleCreateRequest) -> WhaleSummary:
             win_rate_percent=float(metrics.win_rate_percent) if metrics and metrics.win_rate_percent is not None else None,
             last_active_at=whale.last_active_at or whale.first_seen_at or datetime.now(timezone.utc),
         )
+
+
+@router.patch("/{whale_id}", response_model=WhaleSummary)
+async def update_whale(whale_id: str, payload: WhaleUpdateRequest) -> WhaleSummary:
+    with SessionLocal() as session:
+        whale = session.get(Whale, whale_id)
+        if not whale:
+            raise HTTPException(status_code=404, detail="Whale not found")
+        if payload.labels is not None:
+            whale.labels = payload.labels
+        if payload.type is not None:
+            whale.type = payload.type
+        session.commit()
+        metrics = session.get(CurrentWalletMetrics, whale.id)
+        chain = session.get(Chain, whale.chain_id)
+        chain_slug = chain.slug if chain else "ethereum"
+        return WhaleSummary(
+            id=whale.id,
+            address=whale.address,
+            chain=chain_slug,  # type: ignore[arg-type]
+            type=whale.type.value if hasattr(whale.type, "value") else whale.type,
+            labels=whale.labels or [],
+            roi_percent=float(metrics.roi_percent or 0) if metrics else 0.0,
+            realized_pnl_usd=float(metrics.realized_pnl_usd or 0) if metrics else 0.0,
+            unrealized_pnl_usd=float(metrics.unrealized_pnl_usd) if metrics and metrics.unrealized_pnl_usd is not None else None,
+            portfolio_value_usd=float(metrics.portfolio_value_usd or 0) if metrics else 0.0,
+            volume_30d_usd=float(metrics.volume_30d_usd or 0) if metrics else 0.0,
+            trades_30d=int(metrics.trades_30d or 0) if metrics else 0,
+            win_rate_percent=float(metrics.win_rate_percent) if metrics and metrics.win_rate_percent is not None else None,
+            last_active_at=whale.last_active_at or whale.first_seen_at or datetime.now(timezone.utc),
+        )
+
+
+@router.delete("/{whale_id}", response_model=DeleteResponse)
+async def delete_whale(whale_id: str) -> DeleteResponse:
+    with SessionLocal() as session:
+        whale = session.get(Whale, whale_id)
+        if not whale:
+            raise HTTPException(status_code=404, detail="Whale not found")
+        session.delete(whale)
+        session.commit()
+    return DeleteResponse(success=True)
 
 
 @router.get("/{whale_id}/backfill_status", response_model=BackfillStatus)

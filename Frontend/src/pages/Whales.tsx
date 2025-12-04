@@ -16,6 +16,19 @@ import type { ChainId } from '@/types/api';
 import { api } from '@/lib/apiClient';
 import type { WhaleSummary } from '@/types/api';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { toast } from '@/components/ui/sonner';
 
 const chains: ChainId[] = ['ethereum', 'bitcoin', 'hyperliquid'];
 const whaleTypes = [
@@ -64,6 +77,11 @@ export default function Whales() {
   const [whales, setWhales] = useState<WhaleSummary[]>([]);
   const [total, setTotal] = useState(0);
   const [pageSize, setPageSize] = useState(5);
+  const [editingWhale, setEditingWhale] = useState<WhaleSummary | null>(null);
+  const [tagInput, setTagInput] = useState('');
+  const [savingTag, setSavingTag] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<WhaleSummary | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const loadWhales = useCallback(() => {
     const params = new URLSearchParams();
@@ -339,7 +357,18 @@ export default function Whales() {
 
       {/* Whale Table */}
       <div className="space-y-4">
-        <WhaleTable whales={pageData} sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
+        <WhaleTable
+          whales={pageData}
+          sortBy={sortBy}
+          sortDir={sortDir}
+          onSort={handleSort}
+          showActions
+          onEditTags={(whale) => {
+            setEditingWhale(whale);
+            setTagInput((whale.labels || []).join(', '));
+          }}
+          onDeleteWhale={(whale) => setPendingDelete(whale)}
+        />
         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
           <div className="flex items-center gap-2">
             <span className="text-sm text-muted-foreground">Rows per page</span>
@@ -400,6 +429,106 @@ export default function Whales() {
           )}
         </div>
       </div>
+
+      <Dialog
+        open={!!editingWhale}
+        onOpenChange={(open) => {
+          if (!open) {
+            setEditingWhale(null);
+            setTagInput('');
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit whale tags</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2">
+            <p className="text-sm text-muted-foreground">
+              Comma separate multiple tags. They surface in the table and search.
+            </p>
+            <Input
+              value={tagInput}
+              onChange={(e) => setTagInput(e.target.value)}
+              placeholder="fund, exchange, alpha"
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setEditingWhale(null);
+                setTagInput('');
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={async () => {
+                if (!editingWhale) return;
+                setSavingTag(true);
+                const labels = tagInput.split(',').map((l) => l.trim()).filter(Boolean);
+                try {
+                  const updated = await api.updateWhale(editingWhale.id, { labels });
+                  setWhales((prev) => prev.map((w) => (w.id === updated.id ? { ...w, labels: updated.labels } : w)));
+                  toast.success('Updated tags', {
+                    description: labels.length ? labels.join(', ') : 'No tags set',
+                  });
+                  setEditingWhale(null);
+                  setTagInput('');
+                } catch (err: any) {
+                  toast.error(err?.message || 'Failed to update tags');
+                } finally {
+                  setSavingTag(false);
+                }
+              }}
+              disabled={savingTag}
+            >
+              {savingTag ? 'Saving...' : 'Save'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={!!pendingDelete} onOpenChange={(open) => !open && setPendingDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete whale?</AlertDialogTitle>
+            <p className="text-sm text-muted-foreground">
+              This removes the whale and all associated metrics. This action cannot be undone.
+            </p>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setPendingDelete(null)}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={async () => {
+                if (!pendingDelete) return;
+                setDeletingId(pendingDelete.id);
+                try {
+                  await api.deleteWhale(pendingDelete.id);
+                  toast.success('Whale deleted');
+                  setWhales((prev) => prev.filter((w) => w.id !== pendingDelete.id));
+                  setTotal((prev) => Math.max(0, prev - 1));
+                  const nextCount = sortedWhales.length - 1;
+                  const nextTotalPages = Math.max(1, Math.ceil(nextCount / pageSize));
+                  if (currentPage > nextTotalPages) {
+                    setPage(nextTotalPages);
+                  }
+                } catch (err: any) {
+                  toast.error(err?.message || 'Failed to delete whale');
+                } finally {
+                  setPendingDelete(null);
+                  setDeletingId(null);
+                }
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={!!deletingId}
+            >
+              {deletingId ? 'Deleting...' : 'Delete'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

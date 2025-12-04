@@ -103,7 +103,8 @@ class HyperliquidIngestor:
                 logger.info("HL ingest start whale=%s", whale.address)
                 wrote = self._process_account(session, chain.id, whale, max_pages=self.max_pages_per_tick)
                 logger.info("HL ingest end whale=%s wrote=%s", whale.address, wrote)
-            self._commit_with_retry(session)
+                # Commit after each whale to release SQLite locks quickly and avoid blocking API reads.
+                self._commit_with_retry(session)
 
     def _commit_with_retry(self, session, retries: int = 3, delay: float = 0.5) -> None:
         for attempt in range(retries):

@@ -38,6 +38,31 @@ async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function apiPatch<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${baseUrl}${path}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`API error ${res.status} for ${path}: ${detail || res.statusText}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+async function apiDelete<T>(path: string): Promise<T> {
+  const res = await fetch(`${baseUrl}${path}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`API error ${res.status} for ${path}: ${detail || res.statusText}`);
+  }
+  return res.json() as Promise<T>;
+}
+
 export const api = {
   getDashboardSummary: () => apiGet<DashboardSummary>('/api/v1/dashboard/summary'),
   getTopWhales: (limit = 8) =>
@@ -46,6 +71,10 @@ export const api = {
     apiGet<{ items: WhaleSummary[]; total: number }>(`/api/v1/whales?${params.toString()}`),
   createWhale: (payload: WhaleCreateRequest) =>
     apiPost<WhaleSummary>('/api/v1/whales', payload),
+  updateWhale: (whaleId: string, payload: import('@/types/api').WhaleUpdateRequest) =>
+    apiPatch<WhaleSummary>(`/api/v1/whales/${whaleId}`, payload),
+  deleteWhale: (whaleId: string) =>
+    apiDelete<import('@/types/api').DeleteResponse>(`/api/v1/whales/${whaleId}`),
   getBackfillStatus: (whaleId: string) =>
     apiGet<BackfillStatus>(`/api/v1/whales/${whaleId}/backfill_status`),
   resolveWhale: (chain: string, address: string) =>

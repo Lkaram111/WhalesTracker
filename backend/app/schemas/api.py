@@ -158,6 +158,15 @@ class WhaleCreateRequest(BaseModel):
     type: WhaleType | None = None
 
 
+class WhaleUpdateRequest(BaseModel):
+    labels: list[str] | None = None
+    type: WhaleType | None = None
+
+
+class DeleteResponse(BaseModel):
+    success: bool
+
+
 class BackfillStatus(BaseModel):
     whale_id: str
     chain: ChainId | None = None

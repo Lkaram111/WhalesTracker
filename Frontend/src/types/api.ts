@@ -123,6 +123,15 @@ export interface WhaleCreateRequest {
   type?: WhaleType;
 }
 
+export interface WhaleUpdateRequest {
+  labels?: string[];
+  type?: WhaleType;
+}
+
+export interface DeleteResponse {
+  success: boolean;
+}
+
 export interface BackfillStatus {
   whale_id: string;
   chain?: ChainId | null;
