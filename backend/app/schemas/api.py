@@ -181,5 +181,72 @@ class PortfolioHistoryResponse(BaseModel):
 class PositionsResponse(BaseModel):
     items: list[OpenPosition]
 
-class PositionsResponse(BaseModel):
-    items: list[OpenPosition]
+
+class CopierBacktestRequest(BaseModel):
+    chain: ChainId
+    address: str
+    initial_deposit_usd: float = Field(gt=0, description="Starting capital for the backtest")
+    position_size_pct: float | None = Field(
+        default=None, ge=0, le=200, description="Optional override: % of whale size to copy"
+    )
+    fee_bps: float = Field(default=5.0, ge=0, le=1000, description="Per-trade fee in bps")
+    slippage_bps: float = Field(default=5.0, ge=0, le=1000, description="Per-trade slippage in bps")
+    leverage: float | None = Field(
+        default=1.0,
+        ge=0.1,
+        le=100.0,
+        description="Leverage multiplier applied to position notional",
+    )
+    start: datetime | None = Field(default=None, description="Optional start time filter")
+    end: datetime | None = Field(default=None, description="Optional end time filter")
+    max_trades: int | None = Field(default=500, ge=1, le=5000, description="Limit number of trades")
+    asset_symbols: list[str] | None = Field(
+        default=None,
+        description="Optional allowlist of asset symbols to include; defaults to all traded assets",
+    )
+    include_price_points: bool = Field(
+        default=False,
+        description="Return price points used for marking to avoid re-downloading later",
+    )
+
+
+class BacktestTradeResult(BaseModel):
+    id: int
+    timestamp: datetime
+    direction: str
+    base_asset: str | None
+    notional_usd: float
+    pnl_usd: float
+    fee_usd: float
+    slippage_usd: float
+    net_pnl_usd: float
+    cumulative_pnl_usd: float
+    equity_usd: float
+    unrealized_pnl_usd: float
+    position_size_base: float | None
+
+
+class BacktestSummary(BaseModel):
+    initial_deposit_usd: float
+    recommended_position_pct: float
+    used_position_pct: float
+    total_fees_usd: float
+    total_slippage_usd: float
+    gross_pnl_usd: float
+    net_pnl_usd: float
+    roi_percent: float
+    trades_copied: int
+    win_rate_percent: float | None
+    start: datetime | None
+    end: datetime | None
+
+
+class CopierBacktestResponse(BaseModel):
+    summary: BacktestSummary
+    trades: list[BacktestTradeResult]
+    equity_curve: list[dict]
+    price_points: dict[str, list[dict]] | None = None
+
+
+class WhaleAssetsResponse(BaseModel):
+    assets: list[str]

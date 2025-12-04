@@ -34,9 +34,14 @@ def _safe_sum(values: Iterable[Decimal | None]) -> Decimal:
 
 def _volume_and_count_last_30d(session: Session, whale_id: str, days: int = 30) -> tuple[Decimal, int]:
     window_start = now() - timedelta(days=days)
+    excluded_dirs = {TradeDirection.DEPOSIT, TradeDirection.WITHDRAW}
     trades = (
         session.query(Trade.value_usd)
-        .filter(Trade.whale_id == whale_id, Trade.timestamp >= window_start)
+        .filter(
+            Trade.whale_id == whale_id,
+            Trade.timestamp >= window_start,
+            Trade.direction.notin_(excluded_dirs),
+        )
         .all()
     )
     volume = _safe_sum((t.value_usd for t in trades))
@@ -161,13 +166,25 @@ def recompute_wallet_metrics(session: Session, whale: Whale) -> None:
     )
     realized_pnl = _safe_sum(t.pnl_usd for t in realized_trades) + realized_from_sales
 
-    with_pnl = session.query(Trade.pnl_usd).filter(
-        Trade.whale_id == whale.id, Trade.pnl_usd.isnot(None)
+    # Win rate: only count realized closing fills, ignore zero-PnL entry legs
+    closing_dirs = {
+        TradeDirection.CLOSE_LONG,
+        TradeDirection.CLOSE_SHORT,
+        TradeDirection.SELL,
+    }
+    closing_fills = (
+        session.query(Trade.pnl_usd)
+        .filter(
+            Trade.whale_id == whale.id,
+            Trade.pnl_usd.isnot(None),
+            Trade.pnl_usd != 0,
+            Trade.direction.in_(closing_dirs),
+        )
+        .all()
     )
-    positive = [t.pnl_usd for t in with_pnl if t.pnl_usd and Decimal(t.pnl_usd) > 0]
-    total_count = with_pnl.count()
+    wins = [t for t in closing_fills if Decimal(t.pnl_usd) > 0]
     win_rate_percent = (
-        float(len(positive)) / float(total_count) * 100 if total_count > 0 else None
+        float(len(wins)) / float(len(closing_fills)) * 100 if closing_fills else None
     )
 
     cost_basis_total = _safe_sum(p["cost"] for p in positions.values())
@@ -426,6 +443,13 @@ def _rebuild_hyperliquid_history(session: Session, whale: Whale, trades: list[Tr
         cost_basis = account_value if account_value and account_value > 0 else Decimal(0)
     starting_equity = cost_basis if cost_basis > 0 else account_value or Decimal(0)
 
+    # Rebuild daily data from scratch; drop stale rows to avoid ghost days with no trades
+    existing_dates = {
+        r.date
+        for r in session.query(WalletMetricsDaily.date)
+        .filter(WalletMetricsDaily.whale_id == whale.id)
+        .all()
+    }
     daily: dict[date, dict[str, Decimal | int]] = {}
     cumulative_realized = Decimal(0)
     for t in trades:
@@ -447,6 +471,9 @@ def _rebuild_hyperliquid_history(session: Session, whale: Whale, trades: list[Tr
         equity = starting_equity + realized_to_date if starting_equity is not None else realized_to_date
         unrealized = latest_unrealized if last_day and d == last_day else Decimal(0)
         equity_with_unrealized = equity + unrealized
+        # Portfolio value should not go negative when cost basis is zero; clamp to zero
+        if equity_with_unrealized < 0:
+            equity_with_unrealized = Decimal(0)
         roi_percent = (
             float((equity_with_unrealized - cost_basis) / cost_basis * 100)
             if cost_basis > 0
@@ -478,4 +505,11 @@ def _rebuild_hyperliquid_history(session: Session, whale: Whale, trades: list[Tr
                     win_rate_percent=None,
                 )
             )
+    # Remove any stale days that are no longer represented by trades
+    stale = existing_dates.difference(daily.keys())
+    if stale:
+        session.query(WalletMetricsDaily).filter(
+            WalletMetricsDaily.whale_id == whale.id,
+            WalletMetricsDaily.date.in_(stale),
+        ).delete(synchronize_session=False)
     session.flush()

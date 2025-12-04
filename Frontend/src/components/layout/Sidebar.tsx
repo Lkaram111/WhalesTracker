@@ -9,13 +9,15 @@ import {
   Info,
   ChevronLeft,
   ChevronRight,
-  Waves
+  Waves,
+  LineChart
 } from 'lucide-react';
 
 const navItems = [
   { icon: LayoutDashboard, label: 'Dashboard', path: '/' },
   { icon: Users, label: 'Whales', path: '/whales' },
   { icon: Radio, label: 'Live Feed', path: '/live' },
+  { icon: LineChart, label: 'Copier Backtest', path: '/backtest' },
   { icon: Settings, label: 'Settings', path: '/settings' },
   { icon: Info, label: 'About', path: '/about' },
 ];

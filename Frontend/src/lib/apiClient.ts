@@ -89,4 +89,21 @@ export const api = {
     apiGet<{ points: PortfolioPoint[] }>(
       `/api/v1/wallets/${chain}/${address}/portfolio-history?days=${days}`
     ),
+  runCopierBacktest: (body: {
+    chain: string;
+    address: string;
+    initial_deposit_usd: number;
+    position_size_pct?: number | null;
+    fee_bps?: number;
+    slippage_bps?: number;
+    start?: string;
+    end?: string;
+    max_trades?: number;
+    asset_symbols?: string[];
+    include_price_points?: boolean;
+  }) => apiPost<import('@/types/api').CopierBacktestResponse>('/api/v1/backtest/copier', body),
+  getWhaleAssets: (chain: string, address: string) =>
+    apiGet<import('@/types/api').WhaleAssetsResponse>(
+      `/api/v1/backtest/assets?chain=${chain}&address=${address}`
+    ),
 };

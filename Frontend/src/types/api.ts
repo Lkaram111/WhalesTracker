@@ -131,3 +131,56 @@ export interface BackfillStatus {
   message?: string | null;
   updated_at?: string | null;
 }
+
+export interface BacktestTrade {
+  id: number;
+  timestamp: string;
+  direction: string;
+  base_asset: string | null;
+  notional_usd: number;
+  pnl_usd: number;
+  fee_usd: number;
+  slippage_usd: number;
+  net_pnl_usd: number;
+  cumulative_pnl_usd: number;
+  equity_usd: number;
+  unrealized_pnl_usd: number;
+  position_size_base: number | null;
+}
+
+export interface BacktestSummary {
+  initial_deposit_usd: number;
+  recommended_position_pct: number;
+  used_position_pct: number;
+  total_fees_usd: number;
+  total_slippage_usd: number;
+  gross_pnl_usd: number;
+  net_pnl_usd: number;
+  roi_percent: number;
+  trades_copied: number;
+  win_rate_percent: number | null;
+  start: string | null;
+  end: string | null;
+}
+
+export interface EquityCurvePoint {
+  timestamp: string;
+  equity_usd: number;
+  unrealized_pnl_usd: number;
+}
+
+export interface PricePoint {
+  timestamp: string;
+  price: number;
+}
+
+export interface CopierBacktestResponse {
+  summary: BacktestSummary;
+  trades: BacktestTrade[];
+  equity_curve: EquityCurvePoint[];
+  price_points?: Record<string, PricePoint[]>;
+}
+
+export interface WhaleAssetsResponse {
+  assets: string[];
+}
