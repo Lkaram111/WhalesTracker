@@ -342,7 +342,7 @@ export default function CopierBacktest() {
               </div>
               {result && (
                 <div className="text-xs text-muted-foreground">
-                  Window: {result.summary.start ? formatDate(result.summary.start) : 'N/A'} ->{' '}
+                  Window: {result.summary.start ? formatDate(result.summary.start) : 'N/A'} {'->'}{' '}
                   {result.summary.end ? formatDate(result.summary.end) : 'N/A'}
                 </div>
               )}
