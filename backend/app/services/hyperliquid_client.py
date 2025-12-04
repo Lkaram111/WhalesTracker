@@ -100,36 +100,45 @@ class HyperliquidClient:
         address: str,
         start_time: int | None = None,
         max_pages: int = 10,
+        end_time: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch paginated user fills backwards in time using startTime.
+        """Fetch user fills forward in time using the `userFillsByTime` windowed API.
 
-        Hyperliquid returns up to ~2000 fills per call. We walk backwards by setting
-        startTime to the oldest fill time minus one until we exhaust results or hit
-        max_pages.
+        The standard `userFills` endpoint ignores pagination parameters and only returns the
+        latest ~2000 fills. `userFillsByTime` accepts a `startTime` cursor (ms) and returns fills
+        in ascending time order up to an optional `endTime`, capped at ~2000 per response.
+        We advance the cursor to the max timestamp + 1 on each page until we exhaust results
+        or hit `max_pages`.
         """
+        cursor = start_time or 0
         all_fills: list[dict[str, Any]] = []
-        cursor = start_time
-        last_min_time: int | None = None
+        last_max_time: int | None = None
+
         for _ in range(max_pages):
-            batch = self.get_user_fills(address, cursor)
-            if not batch:
+            payload: dict[str, Any] = {"type": "userFillsByTime", "user": address, "startTime": cursor}
+            if end_time is not None:
+                payload["endTime"] = end_time
+            batch = self._post_info(payload)
+            if not isinstance(batch, list) or not batch:
                 break
             all_fills.extend(batch)
+
             times = [f.get("time") for f in batch if f.get("time") is not None]
             if not times:
                 break
-            min_time = min(times)
-            # Stop if the API is ignoring startTime and returning the same window repeatedly.
-            if last_min_time is not None and min_time >= last_min_time:
+            max_time = max(times)
+            # Prevent infinite loops if the API stops advancing
+            if last_max_time is not None and max_time <= last_max_time:
                 break
-            last_min_time = min_time
-            # If we were given a checkpoint and we have paged past it, stop early.
-            if start_time is not None and min_time <= start_time:
-                break
-            cursor = min_time - 1  # walk backward in time
-            # If we received fewer than 2000, likely no more pages
+            last_max_time = max_time
+
+            cursor = max_time + 1  # walk forward in time
+            # If we received fewer than 2000, we've likely reached the end of the window
             if len(batch) < 2000:
                 break
+            if end_time is not None and cursor > end_time:
+                break
+
         return all_fills
 
     def get_user_ledger(self, address: str, start_time: int | None = None, end_time: int | None = None) -> dict[str, Any]:

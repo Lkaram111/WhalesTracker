@@ -144,8 +144,9 @@ class HyperliquidIngestor:
             return False
         try:
             page_limit = 1 if start_time is not None else max_pages
+            cursor = (start_time + 1) if start_time is not None else None
             fills = hyperliquid_client.get_user_fills_paginated(
-                whale.address, start_time=start_time, max_pages=page_limit
+                whale.address, start_time=cursor, max_pages=page_limit
             )
             self._clear_backoff(whale.address)
         except HTTPStatusError as exc:
@@ -266,6 +267,8 @@ class HyperliquidIngestor:
             )
         else:
             logger.debug("HL ingest fills whale=%s no new fills", whale.address)
+            # Record that we checked up to the current cursor so we don't scan behind it next tick.
+            checkpoint.updated_at = datetime.now(timezone.utc)
 
         # Add hyperliquid label if missing
         labels = whale.labels or []
