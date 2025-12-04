@@ -4,7 +4,7 @@ import { ChainBadge } from '@/components/common/ChainBadge';
 import { useUIStore } from '@/stores/uiStore';
 import { useFiltersStore } from '@/stores/filtersStore';
 import { formatUSD } from '@/lib/formatters';
-import { Pause, Play, Radio, SlidersHorizontal } from 'lucide-react';
+import { Pause, Play, Radio, SlidersHorizontal, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { ChainId, LiveEvent } from '@/types/api';
 import { api } from '@/lib/apiClient';
@@ -25,10 +25,41 @@ export default function LiveFeed() {
   const [selectedEventType, setSelectedEventType] = useState<string | null>(null);
   const [showFilters, setShowFilters] = useState(false);
   const [events, setEvents] = useState<LiveEvent[]>([]);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [newEventIds, setNewEventIds] = useState<Set<string>>(new Set());
+
+  const fetchEvents = async () => {
+    setIsRefreshing(true);
+    try {
+      const res = await api.getLiveEvents(100);
+      const incoming = res.items || [];
+      const existingIds = new Set(events.map((e) => e.id));
+      const newcomers = incoming.filter((e) => !existingIds.has(e.id));
+      if (newcomers.length > 0) {
+        setNewEventIds(new Set(newcomers.map((e) => e.id)));
+      }
+      setEvents(incoming);
+      setLastUpdated(new Date());
+    } catch {
+      // keep old events on error
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   useEffect(() => {
-    api.getLiveEvents(50).then((res) => setEvents(res.items)).catch(() => setEvents([]));
+    fetchEvents();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Auto-refresh when live is not paused
+  useEffect(() => {
+    if (liveFeedPaused) return;
+    const id = setInterval(fetchEvents, 10000);
+    return () => clearInterval(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveFeedPaused]);
 
   const filteredEvents = useMemo(() => {
     return events.filter((event) => {
@@ -44,6 +75,11 @@ export default function LiveFeed() {
       return true;
     });
   }, [events, selectedChains, selectedEventType, liveFeedMinValue]);
+
+  const handleManualRefresh = () => {
+    setNewEventIds(new Set());
+    fetchEvents();
+  };
 
   return (
     <div className="space-y-6 animate-fade-up">
@@ -71,27 +107,44 @@ export default function LiveFeed() {
           <p className="text-muted-foreground">Real-time whale activity and transactions</p>
         </div>
         
-        <button
-          onClick={() => setLiveFeedPaused(!liveFeedPaused)}
-          className={cn(
-            'flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium transition-all',
-            liveFeedPaused
-              ? 'border-success bg-success/10 text-success hover:bg-success/20'
-              : 'border-warning bg-warning/10 text-warning hover:bg-warning/20'
+        <div className="flex items-center gap-2">
+          {lastUpdated && (
+            <span className="text-xs text-muted-foreground">
+              Updated {lastUpdated.toLocaleTimeString()}
+            </span>
           )}
-        >
-          {liveFeedPaused ? (
-            <>
-              <Play className="h-4 w-4" />
-              Resume
-            </>
-          ) : (
-            <>
-              <Pause className="h-4 w-4" />
-              Pause
-            </>
-          )}
-        </button>
+          <button
+            onClick={handleManualRefresh}
+            className={cn(
+              'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition-all',
+              isRefreshing ? 'border-border bg-muted text-muted-foreground' : 'border-border hover:bg-muted'
+            )}
+          >
+            <RefreshCw className={cn('h-4 w-4', isRefreshing && 'animate-spin')} />
+            Refresh
+          </button>
+          <button
+            onClick={() => setLiveFeedPaused(!liveFeedPaused)}
+            className={cn(
+              'flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium transition-all',
+              liveFeedPaused
+                ? 'border-success bg-success/10 text-success hover:bg-success/20'
+                : 'border-warning bg-warning/10 text-warning hover:bg-warning/20'
+            )}
+          >
+            {liveFeedPaused ? (
+              <>
+                <Play className="h-4 w-4" />
+                Resume
+              </>
+            ) : (
+              <>
+                <Pause className="h-4 w-4" />
+                Pause
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
       {/* Filters Bar */}
@@ -179,6 +232,21 @@ export default function LiveFeed() {
           </div>
         )}
       </div>
+
+      {/* New events banner */}
+      {newEventIds.size > 0 && !liveFeedPaused && (
+        <div className="flex items-center justify-between rounded-lg bg-success/10 border border-success/30 px-3 py-2">
+          <span className="text-sm text-success font-medium">
+            {newEventIds.size} new event{newEventIds.size > 1 ? 's' : ''} available
+          </span>
+          <button
+            onClick={handleManualRefresh}
+            className="text-xs font-semibold text-success underline"
+          >
+            Show latest
+          </button>
+        </div>
+      )}
 
       {/* Stats Strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
