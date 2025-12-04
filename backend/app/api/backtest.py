@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Iterable, Sequence
 
+import logging
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
 
@@ -24,6 +25,7 @@ from app.services.price_service import fetch_and_store_binance_prices
 from app.services.copier_manager import copier_manager
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _percentile(values: Sequence[Decimal], pct: float) -> Decimal:
@@ -149,8 +151,12 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
                     limit=1000,
                 )
                 session.flush()
-            except Exception:
-                pass
+            except Exception as exc:
+                # SQLite can raise "database is locked" under concurrent writers; reset the session and continue.
+                session.rollback()
+                logger.warning(
+                    "price preload failed; continuing without new prices: %s", exc
+                )
 
             rows = (
                 session.query(PriceHistory.asset_symbol, PriceHistory.timestamp, PriceHistory.price_usd)
