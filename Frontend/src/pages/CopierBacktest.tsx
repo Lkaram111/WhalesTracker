@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 import { Loader2, Play, SlidersHorizontal, CheckSquare, Square } from 'lucide-react';
 
 const chainOptions: ChainId[] = ['hyperliquid', 'ethereum', 'bitcoin'];
+const TRADE_PAGE_SIZE = 50;
 
 export default function CopierBacktest() {
   const [chain, setChain] = useState<ChainId>('hyperliquid');
@@ -22,8 +23,10 @@ export default function CopierBacktest() {
   const [end, setEnd] = useState<string>('');
   const [includePrices, setIncludePrices] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<CopierBacktestResponse | null>(null);
+  const [lastPayload, setLastPayload] = useState<Record<string, unknown> | null>(null);
 
   // preload whales for selection
   useEffect(() => {
@@ -53,6 +56,9 @@ export default function CopierBacktest() {
       if (start) payload.start = new Date(start).toISOString();
       if (end) payload.end = new Date(end).toISOString();
       if (includePrices) payload.include_price_points = true;
+      payload.trades_limit = TRADE_PAGE_SIZE;
+      payload.trades_offset = 0;
+      setLastPayload(payload);
       const data = await api.runCopierBacktest(payload);
       setResult(data);
     } catch (err: any) {
@@ -79,6 +85,36 @@ export default function CopierBacktest() {
         setSelectedAssets([]);
       });
   }, [chain, address]);
+
+  const handleLoadMoreTrades = async () => {
+    if (!lastPayload || !result) return;
+    const nextOffset = result.trades.length;
+    if (nextOffset >= result.trades_total) return;
+    setLoadingMore(true);
+    setError(null);
+    try {
+      const payload = { ...lastPayload, trades_offset: nextOffset };
+      setLastPayload(payload);
+      const data = await api.runCopierBacktest(payload as any);
+      setResult((prev) =>
+        prev
+          ? {
+              ...data,
+              trades: [...prev.trades, ...(data.trades || [])],
+              trades_total: data.trades_total,
+              trades_limit: data.trades_limit,
+              trades_offset: 0,
+            }
+          : data
+      );
+    } catch (err: any) {
+      setError(err?.message || 'Failed to load more trades');
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  const hasMoreTrades = result ? result.trades_total > result.trades.length : false;
 
   return (
     <div className="space-y-6 animate-fade-up">
@@ -453,6 +489,12 @@ export default function CopierBacktest() {
                   Cumulative PnL & equity after fees, slippage, and unrealized PnL
                 </p>
               </div>
+              <div className="flex items-center justify-between text-xs text-muted-foreground mb-2">
+                <span>
+                  Showing {result.trades.length} of {result.trades_total} trades
+                </span>
+                {hasMoreTrades && <span>Load more to view remaining rows</span>}
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead className="text-xs uppercase text-muted-foreground">
@@ -520,6 +562,18 @@ export default function CopierBacktest() {
                   </tbody>
                 </table>
               </div>
+              {hasMoreTrades && (
+                <div className="mt-3 flex items-center justify-center">
+                  <button
+                    type="button"
+                    onClick={handleLoadMoreTrades}
+                    disabled={loadingMore}
+                    className="inline-flex items-center justify-center rounded-lg border border-border bg-muted px-4 py-2 text-sm font-medium text-foreground hover:bg-muted/80 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {loadingMore ? 'Loading...' : `Show ${Math.min(TRADE_PAGE_SIZE, result.trades_total - result.trades.length)} more`}
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -101,6 +101,8 @@ export const api = {
     max_trades?: number;
     asset_symbols?: string[];
     include_price_points?: boolean;
+    trades_limit?: number;
+    trades_offset?: number;
   }) => apiPost<import('@/types/api').CopierBacktestResponse>('/api/v1/backtest/copier', body),
   getWhaleAssets: (chain: string, address: string) =>
     apiGet<import('@/types/api').WhaleAssetsResponse>(

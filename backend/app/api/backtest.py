@@ -107,6 +107,9 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
     with SessionLocal() as session:
         whale, _ = _resolve_whale(session, payload.chain, payload.address)
 
+        trades_limit = min(max(payload.trades_limit or 50, 1), 500)
+        trades_offset = max(payload.trades_offset or 0, 0)
+
         closing_dirs = {
             TradeDirection.CLOSE_LONG,
             TradeDirection.CLOSE_SHORT,
@@ -176,12 +179,20 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
                 roi_percent=0.0,
                 trades_copied=0,
                 win_rate_percent=None,
-                max_drawdown_percent=0.0,
-                max_drawdown_usd=0.0,
-                start=None,
-                end=None,
+            max_drawdown_percent=0.0,
+            max_drawdown_usd=0.0,
+            start=None,
+            end=None,
+        )
+            return CopierBacktestResponse(
+                summary=empty_summary,
+                trades=[],
+                equity_curve=[],
+                price_points=None,
+                trades_total=0,
+                trades_limit=trades_limit,
+                trades_offset=trades_offset,
             )
-            return CopierBacktestResponse(summary=empty_summary, trades=[], equity_curve=[], price_points=None)
 
         # determine backtest window for price fetch
         start_ts = trades[0].timestamp.replace(second=0, microsecond=0) if trades else None
@@ -465,6 +476,11 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
             end=trades[-1].timestamp if trades else None,
         )
 
+        total_trades = len(results)
+        start_idx = min(trades_offset, total_trades)
+        end_idx = min(start_idx + trades_limit, total_trades)
+        trade_slice = results[start_idx:end_idx]
+
         # Persist backtest parameters and key stats for later copier creation
         run_record = BacktestRun(
             whale_id=whale.id,
@@ -519,9 +535,12 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
 
         return CopierBacktestResponse(
             summary=summary,
-            trades=results,
+            trades=trade_slice,
             equity_curve=equity_curve,
             price_points=price_points,
+            trades_total=total_trades,
+            trades_limit=trades_limit,
+            trades_offset=start_idx,
         )
 
 

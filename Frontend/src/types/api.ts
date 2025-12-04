@@ -183,6 +183,9 @@ export interface CopierBacktestResponse {
   trades: BacktestTrade[];
   equity_curve: EquityCurvePoint[];
   price_points?: Record<string, PricePoint[]>;
+  trades_total: number;
+  trades_limit: number;
+  trades_offset: number;
 }
 
 export interface BacktestRunSummary {

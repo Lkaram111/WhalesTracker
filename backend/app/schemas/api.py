@@ -205,6 +205,17 @@ class CopierBacktestRequest(BaseModel):
         le=5000,
         description="Optional limit on trades to simulate; defaults to all available",
     )
+    trades_limit: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        description="Pagination: max trade rows to return in the response",
+    )
+    trades_offset: int = Field(
+        default=0,
+        ge=0,
+        description="Pagination: offset of trade rows to return in the response",
+    )
     asset_symbols: list[str] | None = Field(
         default=None,
         description="Optional allowlist of asset symbols to include; defaults to all traded assets",
@@ -301,6 +312,9 @@ class CopierBacktestResponse(BaseModel):
     trades: list[BacktestTradeResult]
     equity_curve: list[dict]
     price_points: dict[str, list[dict]] | None = None
+    trades_total: int
+    trades_limit: int
+    trades_offset: int
 
 
 class WhaleAssetsResponse(BaseModel):
