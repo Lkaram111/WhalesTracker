@@ -31,6 +31,7 @@ from app.services.metrics_service import (
     recompute_wallet_metrics,
     rebuild_portfolio_history_from_trades,
 )
+from app.core.time_utils import now
 
 router = APIRouter()
 
@@ -185,7 +186,6 @@ async def get_wallet_detail(
             external_explorer_url=build_explorer_url(chain_obj.slug, whale.address),
         )
 
-        now = datetime.now(timezone.utc)
         metrics = WalletMetrics(
             roi_percent=float(cm.roi_percent or 0) if cm else 0.0,
             realized_pnl_usd=float(cm.realized_pnl_usd or 0) if cm else 0.0,
@@ -194,8 +194,8 @@ async def get_wallet_detail(
             volume_30d_usd=float(cm.volume_30d_usd or 0) if cm else 0.0,
             trades_30d=int(cm.trades_30d or 0) if cm else 0,
             win_rate_percent=float(cm.win_rate_percent) if cm and cm.win_rate_percent is not None else None,
-            first_seen_at=whale.first_seen_at or now,
-            last_active_at=whale.last_active_at or whale.first_seen_at or now,
+            first_seen_at=whale.first_seen_at or now(),
+            last_active_at=whale.last_active_at or whale.first_seen_at or now(),
         )
 
         holdings_payload = [
@@ -226,7 +226,7 @@ async def get_roi_history(
         whale, _ = _resolve_whale(session, chain, address)
         from app.models import WalletMetricsDaily
 
-        since = datetime.now(timezone.utc).date() - timedelta(days=days)
+        since = now().date() - timedelta(days=days)
 
         def _fetch():
             return (
@@ -262,7 +262,7 @@ async def get_portfolio_history(
         whale, _ = _resolve_whale(session, chain, address)
         from app.models import WalletMetricsDaily
 
-        since = datetime.now(timezone.utc).date() - timedelta(days=days)
+        since = now().date() - timedelta(days=days)
         def _fetch():
             return (
                 session.query(WalletMetricsDaily)

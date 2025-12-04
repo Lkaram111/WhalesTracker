@@ -12,12 +12,13 @@ from app.services.holdings_service import refresh_holdings_for_whales
 from app.services.metrics_service import recompute_all_wallet_metrics, rebuild_all_portfolio_histories
 from app.services.price_updater import update_prices
 from app.workers.classifier import classifier
+from app.core.time_utils import now
 
 logger = logging.getLogger(__name__)
 
 
 def _refresh_holdings_and_metrics() -> None:
-    started = datetime.now()
+    started = now()
     logger.info("scheduler: refresh_holdings_and_metrics start")
     try:
         with SessionLocal() as session:
@@ -27,11 +28,11 @@ def _refresh_holdings_and_metrics() -> None:
     except Exception:
         logger.exception("scheduler: refresh_holdings_and_metrics failed")
         return
-    logger.info("scheduler: refresh_holdings_and_metrics done in %.2fs", (datetime.now() - started).total_seconds())
+    logger.info("scheduler: refresh_holdings_and_metrics done in %.2fs", (now() - started).total_seconds())
 
 
 def _rebuild_histories_job() -> None:
-    started = datetime.now()
+    started = now()
     logger.info("scheduler: rebuild_histories start")
     try:
         with SessionLocal() as session:
@@ -39,22 +40,22 @@ def _rebuild_histories_job() -> None:
     except Exception:
         logger.exception("scheduler: rebuild_histories failed")
         return
-    logger.info("scheduler: rebuild_histories done in %.2fs", (datetime.now() - started).total_seconds())
+    logger.info("scheduler: rebuild_histories done in %.2fs", (now() - started).total_seconds())
 
 
 def _classify_whales() -> None:
-    started = datetime.now()
+    started = now()
     logger.info("scheduler: classify_whales start")
     try:
         classifier.run()
     except Exception:
         logger.exception("scheduler: classify_whales failed")
         return
-    logger.info("scheduler: classify_whales done in %.2fs", (datetime.now() - started).total_seconds())
+    logger.info("scheduler: classify_whales done in %.2fs", (now() - started).total_seconds())
 
 
 def _update_prices_job() -> None:
-    started = datetime.now()
+    started = now()
     logger.info("scheduler: update_prices start")
     try:
         with SessionLocal() as session:
@@ -62,7 +63,7 @@ def _update_prices_job() -> None:
     except Exception:
         logger.exception("scheduler: update_prices failed")
         return
-    logger.info("scheduler: update_prices done in %.2fs", (datetime.now() - started).total_seconds())
+    logger.info("scheduler: update_prices done in %.2fs", (now() - started).total_seconds())
 
 
 def start_scheduler() -> BackgroundScheduler:
@@ -71,7 +72,7 @@ def start_scheduler() -> BackgroundScheduler:
         _refresh_holdings_and_metrics,
         "interval",
         minutes=5,
-        next_run_time=datetime.now(),
+        next_run_time=now(),
         id="refresh_holdings_and_metrics",
         replace_existing=True,
         coalesce=True,
@@ -80,7 +81,7 @@ def start_scheduler() -> BackgroundScheduler:
         _update_prices_job,
         "interval",
         minutes=30,
-        next_run_time=datetime.now(),
+        next_run_time=now(),
         id="price_updater",
         replace_existing=True,
         coalesce=True,
@@ -98,7 +99,7 @@ def start_scheduler() -> BackgroundScheduler:
         _classify_whales,
         "interval",
         minutes=15,
-        next_run_time=datetime.now(),
+        next_run_time=now(),
         id="whale_classifier",
         replace_existing=True,
         coalesce=True,

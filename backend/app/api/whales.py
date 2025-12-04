@@ -28,6 +28,7 @@ from app.services.backfill_service import backfill_wallet_history
 from app.services.hyperliquid_client import hyperliquid_client
 from app.services.metrics_service import recompute_wallet_metrics
 from app.services.holdings_service import refresh_holdings_for_whales
+from app.core.time_utils import now
 
 router = APIRouter()
 
@@ -132,7 +133,7 @@ async def list_whales(
                     volume_30d_usd=float(metrics.volume_30d_usd or 0) if metrics else 0.0,
                     trades_30d=int(metrics.trades_30d or 0) if metrics else 0,
                     win_rate_percent=float(metrics.win_rate_percent) if metrics and metrics.win_rate_percent is not None else None,
-                    last_active_at=whale.last_active_at or whale.first_seen_at or datetime.now(timezone.utc),
+                    last_active_at=whale.last_active_at or whale.first_seen_at or now(),
                 )
             )
 
@@ -288,15 +289,14 @@ async def reset_hyperliquid_wallet(whale_id: str) -> BackfillStatus:
             raise HTTPException(status_code=400, detail="Reset allowed only for Hyperliquid wallets")
 
     asyncio.create_task(_reset_hyperliquid_async(whale_id))
-    now = datetime.now(timezone.utc)
-    return BackfillStatus(
-        whale_id=whale_id,
-        chain="hyperliquid",
-        status="running",
-        progress=0.0,
-        message="reset queued",
-        updated_at=now,
-    )
+        return BackfillStatus(
+            whale_id=whale_id,
+            chain="hyperliquid",
+            status="running",
+            progress=0.0,
+            message="reset queued",
+            updated_at=now,
+        )
 
 
 async def _reset_hyperliquid_async(whale_id: str) -> None:
@@ -362,12 +362,11 @@ async def trigger_backfill(whale_id: str) -> BackfillStatus:
         chain_slug = chain.slug if chain else None
 
     asyncio.create_task(_run_backfill_async(whale_id))
-    now = datetime.now(timezone.utc)
     return BackfillStatus(
         whale_id=whale_id,
         chain=chain_slug,
         status="running",
         progress=0.0,
         message="backfill queued",
-        updated_at=now,
+        updated_at=now(),
     )

@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -12,6 +13,7 @@ PROJECT_ROOT = BASE_DIR.parent
 class Settings(BaseSettings):
     app_env: str = "dev"
     app_port: int = 8000
+    app_timezone: str = Field(default="UTC", alias="APP_TIMEZONE")
     enable_scheduler: bool = Field(default=True, alias="ENABLE_SCHEDULER")
     enable_ingestors: bool = Field(default=True, alias="ENABLE_INGESTORS")
 
@@ -48,6 +50,14 @@ class Settings(BaseSettings):
 
         sqlite_path = Path(self.sqlite_db_path).resolve()
         return f"sqlite:///{sqlite_path}"
+
+    @computed_field
+    @property
+    def tzinfo(self) -> ZoneInfo:
+        try:
+            return ZoneInfo(self.app_timezone)
+        except Exception:
+            return ZoneInfo("UTC")
 
 
 @lru_cache

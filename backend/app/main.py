@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import router as api_router
 from app.core.config import settings
 from app.core.scheduler import start_scheduler
+from app.core.time_utils import now
 from app.workers.bitcoin_ingestor import BitcoinIngestor
 from app.workers.ethereum_ingestor import EthereumIngestor
 from app.workers.hyperliquid_ingestor import HyperliquidIngestor

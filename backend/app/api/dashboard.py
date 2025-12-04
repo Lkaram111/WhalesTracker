@@ -6,6 +6,7 @@ from sqlalchemy import func, select, String
 from app.db.session import SessionLocal
 from app.models import Trade, Whale, WalletMetricsDaily, Chain
 from app.schemas.api import DashboardSummary
+from app.core.time_utils import now
 
 router = APIRouter()
 
@@ -15,7 +16,7 @@ async def get_dashboard_summary() -> DashboardSummary:
     with SessionLocal() as session:
         total_tracked = session.scalar(select(func.count()).select_from(Whale)) or 0
 
-        active_since = datetime.now(timezone.utc) - timedelta(hours=24)
+        active_since = now() - timedelta(hours=24)
         active_24h = (
             session.scalar(
                 select(func.count())
