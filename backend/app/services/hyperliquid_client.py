@@ -96,6 +96,7 @@ class HyperliquidClient:
         """
         all_fills: list[dict[str, Any]] = []
         cursor = start_time
+        last_min_time: int | None = None
         for _ in range(max_pages):
             batch = self.get_user_fills(address, cursor)
             if not batch:
@@ -104,7 +105,15 @@ class HyperliquidClient:
             times = [f.get("time") for f in batch if f.get("time") is not None]
             if not times:
                 break
-            cursor = min(times) - 1  # walk backward in time
+            min_time = min(times)
+            # Stop if the API is ignoring startTime and returning the same window repeatedly.
+            if last_min_time is not None and min_time >= last_min_time:
+                break
+            last_min_time = min_time
+            # If we were given a checkpoint and we have paged past it, stop early.
+            if start_time is not None and min_time <= start_time:
+                break
+            cursor = min_time - 1  # walk backward in time
             # If we received fewer than 2000, likely no more pages
             if len(batch) < 2000:
                 break

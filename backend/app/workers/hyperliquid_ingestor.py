@@ -143,8 +143,9 @@ class HyperliquidIngestor:
             progress(100.0, "hyperliquid: skipped due to backoff")
             return False
         try:
+            page_limit = 1 if start_time is not None else max_pages
             fills = hyperliquid_client.get_user_fills_paginated(
-                whale.address, start_time=None, max_pages=max_pages
+                whale.address, start_time=start_time, max_pages=page_limit
             )
             self._clear_backoff(whale.address)
         except HTTPStatusError as exc:
