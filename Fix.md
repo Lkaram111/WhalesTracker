@@ -1,21 +1,20 @@
 # Fix checklist (whale tracker)
 
 ## Snapshot from repo (based on backend/data/whales.db)
-- Latest trades are stale: Hyperliquid last at 2025-12-03 16:10:39, Ethereum last at 2025-12-03 14:10:47 (`select max(timestamp) from trades`).
-- `wallet_metrics_daily` has only 36 rows (one per whale) and all are for 2025-12-03, so ROI/portfolio charts have no history.
-- `ingestion_checkpoints` table migration added (needs `alembic upgrade head` to apply).
-- Frontend API base URL now uses `VITE_API_BASE_URL` with `.env.example` added.
-- Trades now enforce unique `(whale_id, tx_hash)` via index.
+- Latest trades now at 2025-12-04 09:38:38 (Hyperliquid). Ethereum/Bitcoin wallets and seeds removed for now.
+- Non-HL data cleaned from trades/events/holdings; only 3 Hyperliquid wallets remain.
+- `wallet_metrics_daily` rebuilt to 9 rows across the 3 Hyperliquid wallets (dates span 2025-12-01..2025-12-04).
+- `ingestion_checkpoints` table migration added (applied).
+- Frontend API base URL uses `VITE_API_BASE_URL` with `.env.example`.
+- Trades enforce unique `(whale_id, tx_hash)` via index.
 
 ## Data freshness and ingestion (highest priority)
 - [x] Add an Alembic migration for `ingestion_checkpoints` (see `app/models/tables.py`) and rerun `alembic upgrade head` so Hyperliquid cursors persist.
-- [ ] Run ingestors as dedicated processes (or confirm `ENABLE_INGESTORS=true` with FastAPI lifespan actually starts them in prod). Add startup logs to prove Ethereum/Bitcoin/Hyperliquid loops are running.
-- [x] Hyperliquid: fetch fills newer than `checkpoint.last_fill_time`, filter out old ones, and ingest oldest -> newest each tick.
-- [x] Hyperliquid: stop skipping wallets without labels; always ingest by chain. Persist and reuse `last_fill_time`/`last_position_time`.
-- [x] Hyperliquid: store signed sizes (no `abs`); recompute metrics after ingest.
-- [ ] Ethereum: track last processed block height (DB checkpoint) and iterate sequentially; polling only `"latest"` drops every block mined between polls. Implement historical backfill for existing whales.
-- [ ] Ethereum: avoid scanning full blocks + receipts; use `eth_getLogs` filters for tracked whale addresses/topics or a mempool/subscription feed. Add retry/backoff on Infura errors.
-- [ ] Bitcoin: add a checkpoint (last_seen_txid or block height) and paginate beyond `limit=20`; back off on HTTP 429/5xx from mempool.space.
+- [ ] Run ingestors as dedicated processes (or confirm `ENABLE_INGESTORS=true` with FastAPI lifespan actually starts them in prod). Add startup logs to prove Hyperliquid loops are running.
+- [x] Hyperliquid: fetch fills newer than `checkpoint.last_fill_time`, filter out old ones, ingest oldest -> newest; dedupe tx hashes before insert; stop skipping wallets without labels; store signed sizes; recompute metrics after ingest.
+- [ ] Ethereum: track last processed block height and iterate sequentially; polling only `"latest"` drops blocks. Implement historical backfill (disabled for now; seeds removed).
+- [ ] Ethereum: avoid scanning full blocks + receipts; use `eth_getLogs` filters or WS; add retry/backoff on provider errors.
+- [ ] Bitcoin: add a checkpoint (last_seen_txid or block height) and paginate beyond `limit=20`; back off on HTTP 429/5xx (disabled for now; seeds removed).
 
 ## Metrics and history correctness
 - [x] Rebuild `wallet_metrics_daily` for every whale from trades (`rebuild_portfolio_history_from_trades`) and schedule a daily snapshot job; keep ROI/volume per day instead of only today (nightly cron added).
@@ -33,11 +32,11 @@
 
 ## Observability and tests
 - [x] Add ingestion heartbeats/metrics (latest trade per chain + last daily snapshot) via `/api/v1/dashboard/ingestion-status`.
-- [ ] Add tests for: Hyperliquid/Ethereum dedupe and checkpointing, ROI/portfolio history rebuild, trades pagination with `cursor`, and API filtering by `source/direction`.
+- [ ] Add tests for: Hyperliquid dedupe and checkpointing, ROI/portfolio history rebuild, trades pagination with `cursor`, and API filtering by `source/direction`.
 - [x] Document runbooks in `backend/README.md`: how to start ingestors, run backfill, and verify freshness (sample SQL: `select max(timestamp) from trades`).
 
 ## Next actions to run now
 - [x] Apply migration: `cd backend && alembic upgrade head` (done; `ingestion_checkpoints` and unique trade index applied).
-- [ ] Restart backend with `ENABLE_INGESTORS=true ENABLE_SCHEDULER=true` and confirm Hyperliquid/Ethereum/Bitcoin ingestor logs show ticks.
-- [ ] Backfill history: run the Hyperliquid/Bitcoin/Ethereum backfill routines (or the per-wallet reset for Hyperliquid) to repopulate trades and rebuild `wallet_metrics_daily`.
+- [ ] Restart backend with `ENABLE_INGESTORS=true ENABLE_SCHEDULER=true` and confirm Hyperliquid ingestor logs show ticks.
+- [ ] Backfill history: run Hyperliquid backfill/reset as needed to repopulate trades and rebuild `wallet_metrics_daily`.
 - [ ] Recompute metrics/history after backfill: call `rebuild_portfolio_history_from_trades` or trigger the scheduler job; verify charts show multiple dates.
