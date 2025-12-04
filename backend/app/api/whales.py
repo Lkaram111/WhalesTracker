@@ -289,14 +289,14 @@ async def reset_hyperliquid_wallet(whale_id: str) -> BackfillStatus:
             raise HTTPException(status_code=400, detail="Reset allowed only for Hyperliquid wallets")
 
     asyncio.create_task(_reset_hyperliquid_async(whale_id))
-        return BackfillStatus(
-            whale_id=whale_id,
-            chain="hyperliquid",
-            status="running",
-            progress=0.0,
-            message="reset queued",
-            updated_at=now,
-        )
+    return BackfillStatus(
+        whale_id=whale_id,
+        chain="hyperliquid",
+        status="running",
+        progress=0.0,
+        message="reset queued",
+        updated_at=now(),
+    )
 
 
 async def _reset_hyperliquid_async(whale_id: str) -> None:
