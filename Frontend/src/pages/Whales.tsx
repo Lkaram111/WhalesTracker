@@ -29,6 +29,10 @@ const sortOptions = [
   { value: 'realized_pnl_usd', label: 'Realized PnL' },
   { value: 'volume_30d_usd', label: '30d Volume' },
   { value: 'last_active_at', label: 'Last Active' },
+  { value: 'win_rate_percent', label: 'Win Rate' },
+  { value: 'address', label: 'Address' },
+  { value: 'chain', label: 'Chain' },
+  { value: 'type', label: 'Type' },
 ];
 const roiPresets = [
   { value: null, label: 'Any ROI' },
@@ -47,6 +51,8 @@ export default function Whales() {
     setWhaleType,
     sortBy,
     setSortBy,
+    sortDir,
+    setSortDir,
     minRoi,
     setMinRoi,
     searchQuery,
@@ -92,12 +98,54 @@ export default function Whales() {
   }, [selectedChains, whaleType, minRoi, searchQuery, sortBy]);
 
   const filteredWhales = useMemo(() => whales, [whales]);
+  const sortedWhales = useMemo(() => {
+    const dir = sortDir === 'asc' ? 1 : -1;
+    return [...filteredWhales].sort((a, b) => {
+      const getVal = (w: WhaleSummary) => {
+        switch (sortBy) {
+          case 'roi':
+            return w.roi_percent ?? 0;
+          case 'realized_pnl_usd':
+            return w.realized_pnl_usd ?? 0;
+          case 'volume_30d_usd':
+            return w.volume_30d_usd ?? 0;
+          case 'last_active_at':
+            return new Date(w.last_active_at).getTime();
+          case 'win_rate_percent':
+            return w.win_rate_percent ?? -Infinity;
+          case 'address':
+            return w.address.toLowerCase();
+          case 'chain':
+            return w.chain;
+          case 'type':
+            return w.type;
+          default:
+            return 0;
+        }
+      };
+      const va = getVal(a);
+      const vb = getVal(b);
+      if (typeof va === 'number' && typeof vb === 'number') {
+        return (va - vb) * dir;
+      }
+      return String(va).localeCompare(String(vb)) * dir;
+    });
+  }, [filteredWhales, sortBy, sortDir]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredWhales.length / pageSize));
+  const totalPages = Math.max(1, Math.ceil(sortedWhales.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const start = (currentPage - 1) * pageSize;
   const end = start + pageSize;
-  const pageData = filteredWhales.slice(start, end);
+  const pageData = sortedWhales.slice(start, end);
+
+  const handleSort = (field: string) => {
+    if (sortBy === field) {
+      setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortBy(field as typeof sortBy);
+      setSortDir('desc');
+    }
+  };
 
   const activeFiltersCount = [
     selectedChains.length < 3,
@@ -291,7 +339,7 @@ export default function Whales() {
 
       {/* Whale Table */}
       <div className="space-y-4">
-        <WhaleTable whales={pageData} />
+        <WhaleTable whales={pageData} sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
           <div className="flex items-center gap-2">
             <span className="text-sm text-muted-foreground">Rows per page</span>

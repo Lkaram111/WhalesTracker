@@ -5,7 +5,7 @@ import type { ChainId } from '@/types/api';
 interface FiltersState {
   selectedChains: ChainId[];
   whaleType: 'holder' | 'trader' | 'holder_trader' | null;
-  sortBy: 'roi' | 'realized_pnl_usd' | 'volume_30d_usd' | 'last_active_at';
+  sortBy: 'roi' | 'realized_pnl_usd' | 'volume_30d_usd' | 'last_active_at' | 'win_rate_percent' | 'address' | 'chain' | 'type';
   sortDir: 'asc' | 'desc';
   minRoi: number | null;
   activityWindow: '24h' | '7d' | '30d' | '90d' | 'any';

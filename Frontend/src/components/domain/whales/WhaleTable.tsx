@@ -10,13 +10,38 @@ interface WhaleTableProps {
   whales: WhaleSummary[];
   loading?: boolean;
   compact?: boolean;
+  sortBy?: string;
+  sortDir?: 'asc' | 'desc';
+  onSort?: (field: string) => void;
 }
 
-export function WhaleTable({ whales, loading, compact = false }: WhaleTableProps) {
+export function WhaleTable({ whales, loading, compact = false, sortBy, sortDir, onSort }: WhaleTableProps) {
   const navigate = useNavigate();
 
   const handleRowClick = (whale: WhaleSummary) => {
     navigate(`/whales/${whale.chain}/${whale.address}`);
+  };
+
+  const renderHeader = (label: string, field?: string, align: 'left' | 'right' = 'left') => {
+    const isActive = field && sortBy === field;
+    return (
+      <th
+        className={cn(
+          'px-4 py-3 text-xs font-medium uppercase tracking-wider',
+          align === 'right' ? 'text-right' : 'text-left',
+          field && onSort ? 'cursor-pointer select-none' : '',
+          'text-muted-foreground'
+        )}
+        onClick={() => field && onSort && onSort(field)}
+      >
+        <span className="inline-flex items-center gap-1">
+          {label}
+          {isActive && sortDir && (
+            <span className="text-[10px]">{sortDir === 'asc' ? '↑' : '↓'}</span>
+          )}
+        </span>
+      </th>
+    );
   };
 
   return (
@@ -25,34 +50,18 @@ export function WhaleTable({ whales, loading, compact = false }: WhaleTableProps
         <table className="w-full">
           <thead>
             <tr className="border-b border-border bg-muted/30">
-              <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                Address
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                Chain
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                Type
-              </th>
-              <th className="px-4 py-3 text-right text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                ROI
-              </th>
-              <th className="px-4 py-3 text-right text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                Realized PnL
-              </th>
+              {renderHeader('Address', 'address')}
+              {renderHeader('Chain', 'chain')}
+              {renderHeader('Type', 'type')}
+              {renderHeader('ROI', 'roi', 'right')}
+              {renderHeader('Realized PnL', 'realized_pnl_usd', 'right')}
               {!compact && (
                 <>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                    30d Volume
-                  </th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                    Win Rate
-                  </th>
+                  {renderHeader('30d Volume', 'volume_30d_usd', 'right')}
+                  {renderHeader('Win Rate', 'win_rate_percent', 'right')}
                 </>
               )}
-              <th className="px-4 py-3 text-right text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                Last Active
-              </th>
+              {renderHeader('Last Active', 'last_active_at', 'right')}
             </tr>
           </thead>
           <tbody>
