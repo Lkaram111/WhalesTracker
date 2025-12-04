@@ -4,7 +4,8 @@ from typing import Iterable, Sequence
 
 import logging
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, select, inspect
+from sqlalchemy.exc import OperationalError
 
 from app.db.session import SessionLocal
 from app.models import BacktestRun, Chain, PriceHistory, Trade, TradeDirection, Whale
@@ -26,6 +27,22 @@ from app.services.copier_manager import copier_manager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _ensure_backtest_runs_table(session) -> bool:
+    """Create backtest_runs table on the fly if migrations haven't been applied."""
+    try:
+        bind = session.get_bind()
+        if bind is None:
+            return False
+        inspector = inspect(bind)
+        if inspector.has_table(BacktestRun.__tablename__):
+            return False
+        BacktestRun.__table__.create(bind, checkfirst=True)
+        return True
+    except Exception as exc:  # best-effort guardrail; don't block backtests on failure
+        logger.warning("ensure backtest_runs table failed: %s", exc)
+        return False
 
 
 def _percentile(values: Sequence[Decimal], pct: float) -> Decimal:
@@ -418,22 +435,35 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
         )
 
         # Persist backtest parameters and key stats for later copier creation
+        run_record = BacktestRun(
+            whale_id=whale.id,
+            leverage=leverage,
+            position_size_pct=summary.used_position_pct,
+            asset_symbols=assets_used,
+            win_rate_percent=win_rate,
+            trades_copied=len(results),
+            max_drawdown_percent=max_drawdown_percent,
+            max_drawdown_usd=Decimal(max_drawdown_usd) if max_drawdown_usd is not None else None,
+            initial_deposit_usd=initial_deposit,
+            net_pnl_usd=cumulative_net,
+            roi_percent=roi,
+        )
         try:
-            run_record = BacktestRun(
-                whale_id=whale.id,
-                leverage=leverage,
-                position_size_pct=summary.used_position_pct,
-                asset_symbols=assets_used,
-                win_rate_percent=win_rate,
-                trades_copied=len(results),
-                max_drawdown_percent=max_drawdown_percent,
-                max_drawdown_usd=Decimal(max_drawdown_usd) if max_drawdown_usd is not None else None,
-                initial_deposit_usd=initial_deposit,
-                net_pnl_usd=cumulative_net,
-                roi_percent=roi,
-            )
             session.add(run_record)
             session.commit()
+        except OperationalError as exc:
+            session.rollback()
+            if "no such table" in str(exc).lower() and "backtest_runs" in str(exc).lower():
+                created = _ensure_backtest_runs_table(session)
+                if created:
+                    session.add(run_record)
+                    session.commit()
+                    logger.info("Created missing backtest_runs table and retried commit")
+                else:
+                    logger.error("backtest_runs table missing and automatic creation failed")
+                    raise
+            else:
+                raise
         except Exception:
             session.rollback()
             raise
