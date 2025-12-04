@@ -12,6 +12,7 @@ import Settings from "./pages/Settings";
 import About from "./pages/About";
 import NotFound from "./pages/NotFound";
 import CopierBacktest from "./pages/CopierBacktest";
+import LiveCopier from "./pages/LiveCopier";
 
 const queryClient = new QueryClient();
 
@@ -28,6 +29,7 @@ const App = () => (
             <Route path="/whales/:chain/:address" element={<WhaleDetail />} />
             <Route path="/live" element={<LiveFeed />} />
             <Route path="/backtest" element={<CopierBacktest />} />
+            <Route path="/copier" element={<LiveCopier />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/about" element={<About />} />
             <Route path="*" element={<NotFound />} />

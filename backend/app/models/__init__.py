@@ -7,6 +7,7 @@ from app.models.tables import (
     EventType,
     IngestionCheckpoint,
     Holding,
+    BacktestRun,
     PriceHistory,
     Trade,
     TradeDirection,
@@ -31,4 +32,5 @@ __all__ = [
     "EventType",
     "PriceHistory",
     "IngestionCheckpoint",
+    "BacktestRun",
 ]

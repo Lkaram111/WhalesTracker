@@ -40,6 +40,8 @@ class HyperliquidIngestor:
         self._max_backoff_seconds = 60
         self._loop: asyncio.AbstractEventLoop | None = None
         self._schema_ready = False
+        # Cache last seen positions to avoid spamming live feed with unchanged snapshots
+        self._positions_cache: dict[str, dict[str, tuple[float, float | None]]] = {}
 
     def _backoff_active(self, address: str) -> bool:
         entry = self._failure_backoff.get(address)
@@ -302,6 +304,7 @@ class HyperliquidIngestor:
         logger.debug("HL positions whale=%s positions_len=%s", whale.address, len(positions) if positions else 0)
         if not isinstance(positions, list):
             return False
+        cache = self._positions_cache.setdefault(whale.address, {})
         for pos in positions:
             position = pos.get("position") or {}
             coin = pos.get("coin") or position.get("coin")
@@ -312,6 +315,7 @@ class HyperliquidIngestor:
             if coin is None or szi in (None, 0):
                 continue
             size = float(szi)
+            prev_size, prev_entry = cache.get(coin.upper(), (None, None))  # type: ignore
             direction = TradeDirection.LONG if size >= 0 else TradeDirection.SHORT
             value_usd = None
             # Prefer reported position value (notional); otherwise mark*size
@@ -326,18 +330,8 @@ class HyperliquidIngestor:
                     value_usd = abs(size * mp)
                 except Exception:
                     pass
-            session.add(
-                Event(
-                    timestamp=now,
-                    chain_id=chain_id,
-                    type=EventType.PERP_TRADE,
-                    whale_id=whale.id,
-                    summary=f"Position {coin} {direction.value} size {size}",
-                    value_usd=value_usd,
-                    tx_hash=None,
-                    details={"mark_px": mark_px, "entry_px": entry_px, "funding": funding},
-                )
-            )
+            changed = prev_size is None or abs(prev_size - size) > 1e-9 or (prev_entry is None and entry_px is not None)
+            cache[coin.upper()] = (size, entry_px if isinstance(entry_px, (int, float)) else prev_entry)
             holding = (
                 session.query(Holding)
                 .filter(Holding.whale_id == whale.id, Holding.asset_symbol == coin)
@@ -358,24 +352,9 @@ class HyperliquidIngestor:
                         portfolio_percent=None,
                     )
                 )
-            self._schedule_broadcast(
-                {
-                    "id": f"{whale.id}-{coin}-{now.timestamp()}",
-                    "timestamp": now.isoformat(),
-                    "chain": "hyperliquid",
-                    "type": EventType.PERP_TRADE.value,
-                    "wallet": {
-                        "address": whale.address,
-                        "chain": "hyperliquid",
-                        "label": (whale.labels or [None])[0] if whale.labels else None,
-                    },
-                    "summary": f"Position {coin} {direction.value} size {size}",
-                    "value_usd": value_usd or 0.0,
-                    "tx_hash": None,
-                    "details": {"mark_px": mark_px, "entry_px": entry_px, "funding": funding},
-                }
-            )
-            wrote = True
+            # Do not emit position snapshots to the live feed; only update holdings/metrics.
+            if changed:
+                wrote = True
         return wrote
 
     def _schedule_broadcast(self, msg: dict) -> None:

@@ -152,6 +152,8 @@ export interface BacktestSummary {
   initial_deposit_usd: number;
   recommended_position_pct: number;
   used_position_pct: number;
+  leverage_used?: number | null;
+  asset_symbols?: string[] | null;
   total_fees_usd: number;
   total_slippage_usd: number;
   gross_pnl_usd: number;
@@ -159,6 +161,8 @@ export interface BacktestSummary {
   roi_percent: number;
   trades_copied: number;
   win_rate_percent: number | null;
+  max_drawdown_percent?: number | null;
+  max_drawdown_usd?: number | null;
   start: string | null;
   end: string | null;
 }
@@ -179,6 +183,42 @@ export interface CopierBacktestResponse {
   trades: BacktestTrade[];
   equity_curve: EquityCurvePoint[];
   price_points?: Record<string, PricePoint[]>;
+}
+
+export interface BacktestRunSummary {
+  id: number;
+  whale_id: string;
+  created_at: string;
+  leverage: number | null;
+  position_size_pct: number | null;
+  asset_symbols: string[] | null;
+  win_rate_percent: number | null;
+  trades_copied: number | null;
+  max_drawdown_percent: number | null;
+  max_drawdown_usd: number | null;
+  initial_deposit_usd: number | null;
+  net_pnl_usd: number | null;
+  roi_percent: number | null;
+}
+
+export interface LiveTrade {
+  id: number;
+  timestamp: string;
+  direction: string;
+  base_asset: string | null;
+  value_usd: number | null;
+}
+
+export interface LiveTradesResponse {
+  trades: LiveTrade[];
+}
+
+export interface CopierSessionStatus {
+  session_id: number;
+  active: boolean;
+  processed: number;
+  errors: string[];
+  notifications: string[];
 }
 
 export interface WhaleAssetsResponse {

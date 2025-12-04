@@ -106,4 +106,28 @@ export const api = {
     apiGet<import('@/types/api').WhaleAssetsResponse>(
       `/api/v1/backtest/assets?chain=${chain}&address=${address}`
     ),
+  getBacktestRuns: (chain: string, address: string, limit = 50) =>
+    apiGet<import('@/types/api').BacktestRunSummary[]>(
+      `/api/v1/backtest/runs?chain=${chain}&address=${address}&limit=${limit}`
+    ),
+  getLiveTrades: (chain: string, address: string, since?: string, limit = 50) => {
+    const params = new URLSearchParams();
+    params.set('chain', chain);
+    params.set('address', address);
+    params.set('limit', `${limit}`);
+    if (since) params.set('since', since);
+    return apiGet<import('@/types/api').LiveTradesResponse>(`/api/v1/backtest/live-trades?${params.toString()}`);
+  },
+  startCopierSession: (body: {
+    chain: string;
+    address: string;
+    run_id: number;
+    execute?: boolean;
+    position_size_pct?: number | null;
+  }) =>
+    apiPost<import('@/types/api').CopierSessionStatus>('/api/v1/backtest/live/start', body),
+  stopCopierSession: (session_id: number) =>
+    apiPost<import('@/types/api').CopierSessionStatus>(`/api/v1/backtest/live/stop?session_id=${session_id}`, {}),
+  getCopierSessionStatus: (session_id: number) =>
+    apiGet<import('@/types/api').CopierSessionStatus>(`/api/v1/backtest/live/status?session_id=${session_id}`),
 };

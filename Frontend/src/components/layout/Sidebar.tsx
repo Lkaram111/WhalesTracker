@@ -18,6 +18,7 @@ const navItems = [
   { icon: Users, label: 'Whales', path: '/whales' },
   { icon: Radio, label: 'Live Feed', path: '/live' },
   { icon: LineChart, label: 'Copier Backtest', path: '/backtest' },
+  { icon: LineChart, label: 'Live Copier', path: '/copier' },
   { icon: Settings, label: 'Settings', path: '/settings' },
   { icon: Info, label: 'About', path: '/about' },
 ];

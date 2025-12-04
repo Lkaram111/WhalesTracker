@@ -10,9 +10,12 @@ from app.db.session import SessionLocal
 from app.models import (
     Chain,
     CurrentWalletMetrics,
+    Event,
+    EventType,
     Holding,
     Trade,
     TradeDirection,
+    TradeSource,
     WalletMetricsDaily,
     Whale,
 )
@@ -163,6 +166,99 @@ def _serialize_trades(trades: Iterable[Trade], chain_slug: str):
     return items
 
 
+def _sync_hyperliquid_activity(session, whale: Whale, chain_obj: Chain, max_pages: int = 2) -> None:
+    """Fetch and store any missing recent fills so the whale page reflects latest activity."""
+    if chain_obj.slug != "hyperliquid":
+        return
+    last_ts = session.scalar(
+        select(func.max(Trade.timestamp)).where(
+            Trade.whale_id == whale.id,
+            Trade.source == TradeSource.HYPERLIQUID,
+        )
+    )
+    start_time = int(last_ts.timestamp() * 1000) if last_ts else None
+    try:
+        fills = hyperliquid_client.get_user_fills_paginated(whale.address, start_time=start_time, max_pages=max_pages)
+    except Exception:
+        return
+    new_fills = [f for f in fills if start_time is None or (f.get("time") or 0) > start_time]
+    if not new_fills:
+        return
+    seen_tx: set[str] = set()
+    wrote = False
+    for fill in sorted(new_fills, key=lambda f: f.get("time") or 0):
+        tx_hash = fill.get("hash") or str(fill.get("tid") or fill.get("oid") or "")
+        if tx_hash:
+            if tx_hash in seen_tx:
+                continue
+            exists = session.scalar(
+                select(Trade.id).where(Trade.tx_hash == tx_hash, Trade.whale_id == whale.id)
+            )
+            if exists:
+                seen_tx.add(tx_hash)
+                continue
+            seen_tx.add(tx_hash)
+        ts_ms = fill.get("time") or 0
+        timestamp = datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone.utc) if ts_ms else now()
+        sz = fill.get("sz")
+        px = fill.get("px")
+        coin = fill.get("coin") or fill.get("ticker") or "PERP"
+        try:
+            amount_base = float(sz)
+        except Exception:
+            amount_base = None
+        value_usd = None
+        try:
+            value_usd = abs(float(sz) * float(px))
+        except Exception:
+            pass
+        dir_str = str(fill.get("dir") or "").lower()
+        if "close" in dir_str and "short" in dir_str:
+            direction = TradeDirection.CLOSE_SHORT
+        elif "close" in dir_str and "long" in dir_str:
+            direction = TradeDirection.CLOSE_LONG
+        elif "short" in dir_str:
+            direction = TradeDirection.SHORT
+        elif "long" in dir_str:
+            direction = TradeDirection.LONG
+        else:
+            direction = TradeDirection.SHORT if str(fill.get("side") or "").lower() == "a" else TradeDirection.LONG
+        trade = Trade(
+            whale_id=whale.id,
+            timestamp=timestamp,
+            chain_id=chain_obj.id,
+            source=TradeSource.HYPERLIQUID,
+            platform="hyperliquid",
+            direction=direction,
+            base_asset=coin,
+            quote_asset="USD",
+            amount_base=amount_base,
+            amount_quote=None,
+            value_usd=value_usd,
+            pnl_usd=float(fill.get("closedPnl")) if fill.get("closedPnl") is not None else None,
+            pnl_percent=None,
+            tx_hash=tx_hash or None,
+            external_url=None,
+        )
+        session.add(trade)
+        session.add(
+            Event(
+                timestamp=timestamp,
+                chain_id=chain_obj.id,
+                type=EventType.PERP_TRADE,
+                whale_id=whale.id,
+                summary=f"{coin} {direction.value} size {amount_base}",
+                value_usd=value_usd,
+                tx_hash=tx_hash or None,
+                details={"px": px, "dir": dir_str},
+            )
+        )
+        wrote = True
+    if wrote:
+        recompute_wallet_metrics(session, whale)
+        _commit_with_retry(session)
+
+
 @router.get(
     "/{chain}/{address}",
     response_model=WalletDetail,
@@ -173,6 +269,11 @@ async def get_wallet_detail(
 ) -> WalletDetail:
     with SessionLocal() as session:
         whale, chain_obj = _resolve_whale(session, chain, address)
+        try:
+            _sync_hyperliquid_activity(session, whale, chain_obj)
+        except Exception:
+            # best-effort; don't break wallet detail on sync failure
+            pass
         cm = _ensure_metrics_up_to_date(session, whale)
         holdings = session.query(Holding).filter(Holding.whale_id == whale.id).all()
 

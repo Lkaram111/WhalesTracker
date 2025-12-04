@@ -33,6 +33,9 @@ class Settings(BaseSettings):
 
     hyperliquid_info_url: str = "https://api.hyperliquid.xyz/info"
     hyperliquid_max_rps: float = Field(default=3.0, alias="HYPERLIQUID_MAX_RPS")
+    hyperliquid_private_key: str | None = Field(default=None, alias="HYPERLIQUID_PRIVATE_KEY")
+    hyperliquid_address: str | None = Field(default=None, alias="HYPERLIQUID_ADDRESS")
+    hyperliquid_slippage_pct: float = Field(default=1.0, alias="HYPERLIQUID_SLIPPAGE_PCT")
 
     coingecko_api_base_url: str = "https://api.coingecko.com/api/v3"
 

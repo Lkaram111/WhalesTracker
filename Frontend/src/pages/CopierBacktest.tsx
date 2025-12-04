@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/apiClient';
 import type { ChainId, CopierBacktestResponse, WhaleSummary } from '@/types/api';
 import { formatUSDExact, formatPercent, formatDate, formatAddress } from '@/lib/formatters';
@@ -140,7 +140,7 @@ export default function CopierBacktest() {
                 <option value="">-- Choose from tracked whales --</option>
                 {whales.map((w) => (
                   <option key={w.id} value={w.address}>
-                    {w.labels && w.labels.length ? w.labels[0] : formatAddress(w.address)} · {w.chain}
+                    {w.labels && w.labels.length ? w.labels[0] : formatAddress(w.address)} - {w.chain}
                   </option>
                 ))}
               </select>
@@ -342,8 +342,8 @@ export default function CopierBacktest() {
               </div>
               {result && (
                 <div className="text-xs text-muted-foreground">
-                  Window: {result.summary.start ? formatDate(result.summary.start) : '—'} →{' '}
-                  {result.summary.end ? formatDate(result.summary.end) : '—'}
+                  Window: {result.summary.start ? formatDate(result.summary.start) : 'N/A'} ->{' '}
+                  {result.summary.end ? formatDate(result.summary.end) : 'N/A'}
                 </div>
               )}
             </div>
@@ -362,11 +362,27 @@ export default function CopierBacktest() {
                 <SummaryTile label="Fees Paid" value={formatUSDExact(result.summary.total_fees_usd)} />
                 <SummaryTile label="Slippage" value={formatUSDExact(result.summary.total_slippage_usd)} />
                 <SummaryTile
+                  label="Max DD"
+                  value={
+                    result.summary.max_drawdown_percent != null
+                      ? formatPercent(result.summary.max_drawdown_percent)
+                      : 'N/A'
+                  }
+                />
+                <SummaryTile
+                  label="Max DD ($)"
+                  value={
+                    result.summary.max_drawdown_usd != null
+                      ? formatUSDExact(result.summary.max_drawdown_usd)
+                      : 'N/A'
+                  }
+                />
+                <SummaryTile
                   label="Win Rate"
                   value={
                     result.summary.win_rate_percent !== null
                       ? formatPercent(result.summary.win_rate_percent)
-                      : '—'
+                      : 'N/A'
                   }
                 />
                 <SummaryTile
@@ -376,6 +392,14 @@ export default function CopierBacktest() {
                 <SummaryTile
                   label="Using %"
                   value={`${result.summary.used_position_pct.toFixed(1)}%`}
+                />
+                <SummaryTile
+                  label="Leverage"
+                  value={
+                    result.summary.leverage_used != null
+                      ? `${result.summary.leverage_used.toFixed(2)}x`
+                      : 'N/A'
+                  }
                 />
                 <SummaryTile label="Trades Copied" value={String(result.summary.trades_copied)} />
                 <SummaryTile label="Start Equity" value={formatUSDExact(result.summary.initial_deposit_usd)} />
@@ -451,7 +475,7 @@ export default function CopierBacktest() {
                       <tr key={t.id} className="border-b border-border/50 last:border-0">
                         <td className="py-2 pr-3 text-foreground">{formatDate(t.timestamp)}</td>
                         <td className="py-2 pr-3 text-muted-foreground">{t.direction}</td>
-                        <td className="py-2 pr-3 text-muted-foreground">{t.base_asset || '—'}</td>
+                        <td className="py-2 pr-3 text-muted-foreground">{t.base_asset || 'N/A'}</td>
                         <td className="py-2 pr-3 text-right text-foreground">
                           {formatUSDExact(t.notional_usd, 2, 2)}
                         </td>
@@ -520,28 +544,184 @@ function SummaryTile({ label, value, highlight = false }: { label: string; value
 
 function EquityChart({ points }: { points: { timestamp: string; equity_usd: number }[] }) {
   if (!points.length) return null;
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
   const values = points.map((p) => p.equity_usd);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const pad = (max - min) * 0.1 || 1;
+  const min = Math.min(...values, 0);
+  const max = Math.max(...values, 0);
+  const pad = (max - min) * 0.08 || 1;
   const ymin = min - pad;
   const ymax = max + pad;
-  const width = 600;
-  const height = 200;
-  const xs = points.map((_, i) => (i / Math.max(1, points.length - 1)) * width);
-  const ys = values.map((v) => height - ((v - ymin) / (ymax - ymin)) * height);
-  const d = xs
+  const viewWidth = 960;
+  const viewHeight = 280;
+  const padLeft = 20;
+  const padRight = 16;
+  const padTop = 12;
+  const padBottom = 28;
+  const chartWidth = viewWidth - padLeft - padRight;
+  const chartHeight = viewHeight - padTop - padBottom;
+
+  const xs = points.map(
+    (_, i) => padLeft + (chartWidth * i) / Math.max(1, points.length - 1)
+  );
+  const ys = values.map((v) => padTop + (1 - (v - ymin) / (ymax - ymin)) * chartHeight);
+
+  const linePath = xs
     .map((x, i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(2)},${ys[i].toFixed(2)}`)
     .join(' ');
+  const areaPath =
+    `${linePath} ` +
+    `L${xs[xs.length - 1].toFixed(2)},${(padTop + chartHeight).toFixed(2)} ` +
+    `L${xs[0].toFixed(2)},${(padTop + chartHeight).toFixed(2)} Z`;
+
+  const zeroY = padTop + (1 - (0 - ymin) / (ymax - ymin)) * chartHeight;
+  const zeroVisible = zeroY >= padTop && zeroY <= padTop + chartHeight;
+
+  const gridLines = Array.from({ length: 4 }).map((_, idx) => {
+    const y = padTop + (chartHeight / 3) * idx;
+    return {
+      y,
+      value: ymax - ((y - padTop) / chartHeight) * (ymax - ymin),
+    };
+  });
+
+  const nearestIndex = (clientX: number) => {
+    if (!svgRef.current) return null;
+    const rect = svgRef.current.getBoundingClientRect();
+    const scale = rect.width > 0 ? viewWidth / rect.width : 1;
+    const x = (clientX - rect.left) * scale;
+    let closest = 0;
+    let best = Number.POSITIVE_INFINITY;
+    xs.forEach((xp, i) => {
+      const dist = Math.abs(xp - x);
+      if (dist < best) {
+        best = dist;
+        closest = i;
+      }
+    });
+    return closest;
+  };
+
+  const activeIdx = hoverIdx ?? xs.length - 1;
+  const activePoint = points[activeIdx];
 
   return (
-    <div className="w-full overflow-x-auto">
-      <svg width={width} height={height} className="text-primary">
-        <path d={d} fill="none" stroke="currentColor" strokeWidth={2} />
-      </svg>
-      <div className="mt-2 text-xs text-muted-foreground flex justify-between">
-        <span>{formatDate(points[0].timestamp)}</span>
-        <span>{formatDate(points[points.length - 1].timestamp)}</span>
+    <div className="w-full">
+      <div className="relative">
+        <svg
+          ref={svgRef}
+          viewBox={`0 0 ${viewWidth} ${viewHeight}`}
+          preserveAspectRatio="none"
+          className="w-full h-64 text-primary"
+          onMouseMove={(e) => {
+            const idx = nearestIndex(e.clientX);
+            if (idx !== null) setHoverIdx(idx);
+          }}
+          onMouseLeave={() => setHoverIdx(null)}
+        >
+          <defs>
+            <linearGradient id="equityArea" x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" stopColor="currentColor" stopOpacity="0.18" />
+              <stop offset="100%" stopColor="currentColor" stopOpacity="0" />
+            </linearGradient>
+          </defs>
+
+          <rect x={0} y={0} width={viewWidth} height={viewHeight} rx={12} className="fill-background/40" />
+
+          {gridLines.map((g, idx) => (
+            <line
+              key={`grid-${idx}`}
+              x1={padLeft}
+              x2={viewWidth - padRight}
+              y1={g.y}
+              y2={g.y}
+              className="stroke-border/50"
+              strokeWidth={1}
+              strokeDasharray="3 5"
+              vectorEffect="non-scaling-stroke"
+            />
+          ))}
+
+          {zeroVisible && (
+            <line
+              x1={padLeft}
+              x2={viewWidth - padRight}
+              y1={zeroY}
+              y2={zeroY}
+              className="stroke-destructive/70"
+              strokeWidth={1.2}
+              strokeDasharray="6 4"
+              vectorEffect="non-scaling-stroke"
+            />
+          )}
+
+          <path d={areaPath} fill="url(#equityArea)" stroke="none" />
+          <path
+            d={linePath}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2.5}
+            strokeLinecap="round"
+            vectorEffect="non-scaling-stroke"
+          />
+
+          {activePoint && (
+            <>
+              <line
+                x1={xs[activeIdx]}
+                x2={xs[activeIdx]}
+                y1={padTop}
+                y2={padTop + chartHeight}
+                className="stroke-primary/50"
+                strokeWidth={1}
+                strokeDasharray="3 4"
+                vectorEffect="non-scaling-stroke"
+              />
+              <circle
+                cx={xs[activeIdx]}
+                cy={ys[activeIdx]}
+                r={5}
+                className="fill-background stroke-primary"
+                strokeWidth={2}
+                vectorEffect="non-scaling-stroke"
+              />
+            </>
+          )}
+        </svg>
+
+        {activePoint && (
+          <div className="absolute top-3 left-3 rounded-lg border border-border bg-background/90 px-3 py-2 shadow-lg backdrop-blur">
+            <div className="text-xs text-muted-foreground">{formatDate(activePoint.timestamp)}</div>
+            <div className="text-sm font-semibold text-foreground">
+              {formatUSDExact(activePoint.equity_usd, 2, 2)}
+            </div>
+          </div>
+        )}
+
+        {zeroVisible && (
+          <div
+            className="absolute left-1 text-[10px] text-destructive/80"
+            style={{ top: `${(zeroY / viewHeight) * 100}%`, transform: 'translateY(-50%)' }}
+          >
+            0
+          </div>
+        )}
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center justify-between text-xs text-muted-foreground gap-2">
+        <div className="flex items-center gap-2">
+          <span className="inline-flex h-2 w-2 rounded-full bg-primary" />
+          <span>Equity per minute</span>
+          <span className="text-foreground font-semibold">
+            {formatUSDExact(points[0].equity_usd, 2, 2)} {'->'} {formatUSDExact(points[points.length - 1].equity_usd, 2, 2)}
+          </span>
+        </div>
+        <div className="flex items-center gap-3">
+          <span>{formatDate(points[0].timestamp)}</span>
+          <span className="text-muted-foreground/60">-</span>
+          <span>{formatDate(points[points.length - 1].timestamp)}</span>
+        </div>
       </div>
     </div>
   );

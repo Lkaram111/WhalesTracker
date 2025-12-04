@@ -199,7 +199,12 @@ class CopierBacktestRequest(BaseModel):
     )
     start: datetime | None = Field(default=None, description="Optional start time filter")
     end: datetime | None = Field(default=None, description="Optional end time filter")
-    max_trades: int | None = Field(default=500, ge=1, le=5000, description="Limit number of trades")
+    max_trades: int | None = Field(
+        default=None,
+        ge=1,
+        le=5000,
+        description="Optional limit on trades to simulate; defaults to all available",
+    )
     asset_symbols: list[str] | None = Field(
         default=None,
         description="Optional allowlist of asset symbols to include; defaults to all traded assets",
@@ -230,6 +235,8 @@ class BacktestSummary(BaseModel):
     initial_deposit_usd: float
     recommended_position_pct: float
     used_position_pct: float
+    leverage_used: float | None = None
+    asset_symbols: list[str] | None = None
     total_fees_usd: float
     total_slippage_usd: float
     gross_pnl_usd: float
@@ -237,8 +244,56 @@ class BacktestSummary(BaseModel):
     roi_percent: float
     trades_copied: int
     win_rate_percent: float | None
+    max_drawdown_percent: float | None = None
+    max_drawdown_usd: float | None = None
     start: datetime | None
     end: datetime | None
+
+
+class BacktestRunSummary(BaseModel):
+    id: int
+    whale_id: str
+    created_at: datetime
+    leverage: float | None
+    position_size_pct: float | None
+    asset_symbols: list[str] | None
+    win_rate_percent: float | None
+    trades_copied: int | None
+    max_drawdown_percent: float | None
+    max_drawdown_usd: float | None
+    initial_deposit_usd: float | None
+    net_pnl_usd: float | None
+    roi_percent: float | None
+
+
+class LiveTrade(BaseModel):
+    id: int
+    timestamp: datetime
+    direction: str
+    base_asset: str | None
+    value_usd: float | None
+
+
+class LiveTradesResponse(BaseModel):
+    trades: list[LiveTrade]
+
+
+class StartCopierRequest(BaseModel):
+    chain: ChainId
+    address: str
+    run_id: int
+    execute: bool = Field(default=False, description="If true, will submit live orders; otherwise dry-run.")
+    position_size_pct: float | None = Field(
+        default=None, ge=0, le=200, description="Override position size percent; defaults to backtest value"
+    )
+
+
+class CopierSessionStatus(BaseModel):
+    session_id: int
+    active: bool
+    processed: int
+    errors: list[str]
+    notifications: list[str] = Field(default_factory=list)
 
 
 class CopierBacktestResponse(BaseModel):

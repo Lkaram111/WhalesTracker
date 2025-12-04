@@ -209,3 +209,23 @@ class IngestionCheckpoint(Base, TimestampMixin):
     chain_slug = Column(String(64), nullable=False)
     last_fill_time = Column(BigInteger, nullable=True)  # ms epoch of latest ingested fill
     last_position_time = Column(DateTime(timezone=True), nullable=True)
+
+
+class BacktestRun(Base):
+    __tablename__ = "backtest_runs"
+    __table_args__ = (Index("ix_backtest_runs_whale", "whale_id"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    whale_id = Column(String(36), ForeignKey("whales.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+    leverage = Column(Numeric(20, 10), nullable=True)
+    position_size_pct = Column(Float, nullable=True)
+    asset_symbols = Column(JSON, nullable=True)
+    win_rate_percent = Column(Float, nullable=True)
+    trades_copied = Column(Integer, nullable=True)
+    max_drawdown_percent = Column(Float, nullable=True)
+    max_drawdown_usd = Column(Numeric(30, 10), nullable=True)
+    initial_deposit_usd = Column(Numeric(30, 10), nullable=True)
+    net_pnl_usd = Column(Numeric(30, 10), nullable=True)
+    roi_percent = Column(Float, nullable=True)
