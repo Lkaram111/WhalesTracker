@@ -37,6 +37,8 @@ from app.services.metrics_service import (
 from app.core.time_utils import now
 
 router = APIRouter()
+_positions_cache: dict[str, tuple[float, list[OpenPosition]]] = {}
+_POS_CACHE_TTL = 10.0  # seconds
 
 EXPLORER_BASES = {
     "ethereum": "https://etherscan.io/address/",
@@ -399,8 +401,14 @@ async def get_wallet_positions(
     if chain.lower() != "hyperliquid":
         return PositionsResponse(items=[])
 
+    cache_key = address.lower()
+    now_ts = time.time()
+    cached = _positions_cache.get(cache_key)
+    if cached and now_ts - cached[0] <= _POS_CACHE_TTL:
+        return PositionsResponse(items=cached[1])
+
     try:
-        state = hyperliquid_client.get_clearinghouse_state(address)
+        state = hyperliquid_client.get_clearinghouse_state(address, use_cache=True, ttl=5.0)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail="Failed to fetch positions") from exc
 
@@ -465,6 +473,7 @@ async def get_wallet_positions(
                 )
             )
 
+    _positions_cache[cache_key] = (now_ts, items)
     return PositionsResponse(items=items)
 
 

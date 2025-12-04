@@ -682,3 +682,26 @@ def copier_session_status(session_id: int = Query(...)) -> CopierSessionStatus:
         errors=sess.errors,
         notifications=sess.notifications,
     )
+
+
+@router.get("/live/active", response_model=list[CopierSessionStatus])
+def list_active_copier_sessions(
+    chain: ChainId = Query(...),
+    address: str = Query(...),
+) -> list[CopierSessionStatus]:
+    """Return active copier sessions for a whale so the UI can resume after refresh/navigation."""
+    with SessionLocal() as session:
+        whale, _ = _resolve_whale(session, chain, address)
+    sessions = copier_manager.list_sessions_for_whale(whale.id)
+    out: list[CopierSessionStatus] = []
+    for sess in sessions:
+        out.append(
+            CopierSessionStatus(
+                session_id=sess.id,
+                active=sess.active,
+                processed=sess.processed,
+                errors=sess.errors,
+                notifications=sess.notifications,
+            )
+        )
+    return out

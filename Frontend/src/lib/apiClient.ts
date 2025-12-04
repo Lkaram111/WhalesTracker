@@ -128,6 +128,10 @@ export const api = {
     position_size_pct?: number | null;
   }) =>
     apiPost<import('@/types/api').CopierSessionStatus>('/api/v1/backtest/live/start', body),
+  listActiveCopierSessions: (chain: string, address: string) =>
+    apiGet<import('@/types/api').CopierSessionStatus[]>(
+      `/api/v1/backtest/live/active?chain=${chain}&address=${address}`
+    ),
   stopCopierSession: (session_id: number) =>
     apiPost<import('@/types/api').CopierSessionStatus>(`/api/v1/backtest/live/stop?session_id=${session_id}`, {}),
   getCopierSessionStatus: (session_id: number) =>

@@ -26,6 +26,7 @@ export default function LiveCopier() {
     errors: [],
     notifications: [],
   });
+  const sessionStorageKey = 'liveCopierSession';
 
   useEffect(() => {
     const params = new URLSearchParams();
@@ -65,6 +66,31 @@ export default function LiveCopier() {
     }
   }, [chain, address]);
 
+  // Restore an active copier session if it exists (after refresh/navigation)
+  useEffect(() => {
+    const restore = async () => {
+      if (!chain || !address) return;
+      try {
+        const active = await api.listActiveCopierSessions(chain, address);
+        if (active && active.length > 0) {
+          const sess = active[0];
+          setSessionId(sess.session_id);
+          setLive(sess.active);
+          setStatus({
+            processed: sess.processed,
+            errors: sess.errors || [],
+            notifications: sess.notifications || [],
+          });
+          // restart polling from scratch
+          lastTsRef.current = undefined;
+        }
+      } catch (err) {
+        // ignore restore errors
+      }
+    };
+    restore();
+  }, [chain, address]);
+
   const startLive = () => {
     if (!selectedRun || !address) return;
     setError(null);
@@ -81,6 +107,12 @@ export default function LiveCopier() {
         setSessionId(res.session_id);
         setLive(true);
         setStatus({ processed: res.processed, errors: res.errors || [], notifications: res.notifications || [] });
+        try {
+          const payload = { session_id: res.session_id, chain, address };
+          localStorage.setItem(sessionStorageKey, JSON.stringify(payload));
+        } catch (_) {
+          // ignore storage issues
+        }
       })
       .catch((err: any) => {
         setError(err?.message || 'Failed to start session');
@@ -95,6 +127,11 @@ export default function LiveCopier() {
         api.stopCopierSession(sessionId).catch(() => {});
     }
     lastTsRef.current = undefined;
+    try {
+      localStorage.removeItem(sessionStorageKey);
+    } catch (_) {
+      // ignore storage issues
+    }
   };
 
   // poll trades every second when live
@@ -131,6 +168,23 @@ export default function LiveCopier() {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [live, selectedRun, chain, address, sessionId]);
+
+  // On first render, attempt to reattach to a stored session id
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(sessionStorageKey);
+      if (!raw) return;
+      const stored = JSON.parse(raw);
+      if (stored?.session_id && stored.chain === chain && stored.address === address) {
+        setSessionId(stored.session_id);
+        setLive(true);
+      } else {
+        localStorage.removeItem(sessionStorageKey);
+      }
+    } catch (_) {
+      // ignore storage errors
+    }
+  }, [chain, address]);
 
   return (
     <div className="space-y-6 animate-fade-up">

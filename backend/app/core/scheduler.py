@@ -3,13 +3,14 @@ from __future__ import annotations
 from datetime import datetime
 
 import logging
+from apscheduler.executors.pool import ThreadPoolExecutor
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.db.session import SessionLocal
-from app.models import Whale
+from app.models import Chain, Whale
 from app.services.holdings_service import refresh_holdings_for_whales
-from app.services.metrics_service import recompute_all_wallet_metrics, rebuild_all_portfolio_histories
+from app.services.metrics_service import rebuild_all_portfolio_histories, recompute_wallet_metrics, _commit_with_retry
 from app.services.price_updater import update_prices
 from app.workers.classifier import classifier
 from app.core.time_utils import now
@@ -23,8 +24,15 @@ def _refresh_holdings_and_metrics() -> None:
     try:
         with SessionLocal() as session:
             whales = session.query(Whale).all()
-            refresh_holdings_for_whales(session, whales)
-            recompute_all_wallet_metrics(session)
+            chain_map = {c.id: c for c in session.query(Chain).all()}
+            # Hyperliquid whales are updated by the ingestor; skip to avoid redundant /info calls.
+            non_hl_whales = [
+                w for w in whales if chain_map.get(w.chain_id) and chain_map[w.chain_id].slug != "hyperliquid"
+            ]
+            refresh_holdings_for_whales(session, non_hl_whales)
+            for whale in non_hl_whales:
+                recompute_wallet_metrics(session, whale)
+            _commit_with_retry(session)
     except Exception:
         logger.exception("scheduler: refresh_holdings_and_metrics failed")
         return
@@ -67,15 +75,16 @@ def _update_prices_job() -> None:
 
 
 def start_scheduler() -> BackgroundScheduler:
-    scheduler = BackgroundScheduler()
+    scheduler = BackgroundScheduler(executors={"default": ThreadPoolExecutor(max_workers=5)})
     scheduler.add_job(
         _refresh_holdings_and_metrics,
         "interval",
-        minutes=5,
+        minutes=15,
         next_run_time=now(),
         id="refresh_holdings_and_metrics",
         replace_existing=True,
         coalesce=True,
+        max_instances=1,
     )
     scheduler.add_job(
         _update_prices_job,
@@ -85,6 +94,7 @@ def start_scheduler() -> BackgroundScheduler:
         id="price_updater",
         replace_existing=True,
         coalesce=True,
+        max_instances=1,
     )
     scheduler.add_job(
         _rebuild_histories_job,
@@ -94,6 +104,7 @@ def start_scheduler() -> BackgroundScheduler:
         id="rebuild_histories",
         replace_existing=True,
         coalesce=True,
+        max_instances=1,
     )
     scheduler.add_job(
         _classify_whales,
@@ -103,6 +114,7 @@ def start_scheduler() -> BackgroundScheduler:
         id="whale_classifier",
         replace_existing=True,
         coalesce=True,
+        max_instances=1,
     )
     scheduler.start()
     return scheduler

@@ -118,6 +118,10 @@ class CopierManager:
         with self._lock:
             return self._sessions.get(session_id)
 
+    def list_sessions_for_whale(self, whale_id: str) -> list[CopierSession]:
+        with self._lock:
+            return [s for s in self._sessions.values() if s.whale_id == whale_id and s.active]
+
     def list_sessions(self) -> list[CopierSession]:
         with self._lock:
             return list(self._sessions.values())

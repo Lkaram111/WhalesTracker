@@ -20,6 +20,8 @@ class HyperliquidClient:
         self._last_request_ts = 0.0
         self._lock = threading.Lock()
         self._max_retries = 3
+        # Simple TTL cache to avoid hitting /info repeatedly for the same address within a short window
+        self._state_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
     def _client(self) -> httpx.Client:
         return httpx.Client(base_url=self.base_url, timeout=self.timeout)
@@ -70,10 +72,21 @@ class HyperliquidClient:
         if last_err:
             raise last_err
 
-    def get_clearinghouse_state(self, address: str) -> dict[str, Any]:
+    def get_clearinghouse_state(self, address: str, use_cache: bool = True, ttl: float = 10.0) -> dict[str, Any]:
+        """Fetch clearinghouse state with an optional short-lived cache to reduce duplicate calls."""
+        now_ts = time.time()
+        if use_cache:
+            cached = self._state_cache.get(address.lower())
+            if cached:
+                ts, payload = cached
+                if now_ts - ts <= ttl:
+                    return payload
         payload = {"type": "clearinghouseState", "user": address}
         data = self._post_info(payload)
-        return data if isinstance(data, dict) else {}
+        state = data if isinstance(data, dict) else {}
+        if use_cache:
+            self._state_cache[address.lower()] = (now_ts, state)
+        return state
 
     def get_user_fills(self, address: str, start_time: int | None = None) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {"type": "userFills", "user": address}

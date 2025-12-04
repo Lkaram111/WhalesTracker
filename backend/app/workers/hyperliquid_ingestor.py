@@ -293,7 +293,7 @@ class HyperliquidIngestor:
             logger.warning("Skipping Hyperliquid position fetch for %s due to backoff", whale.address)
             return False
         try:
-            state = hyperliquid_client.get_clearinghouse_state(whale.address)
+            state = hyperliquid_client.get_clearinghouse_state(whale.address, use_cache=True, ttl=5.0)
             self._clear_backoff(whale.address)
         except HTTPStatusError as exc:
             self._record_backoff(whale.address, exc)

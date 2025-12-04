@@ -198,7 +198,7 @@ def recompute_wallet_metrics(session: Session, whale: Whale) -> None:
     # Hyperliquid: prefer clearinghouse state metrics to avoid inflating notional as portfolio value
     if is_hyperliquid:
         try:
-            state = hyperliquid_client.get_clearinghouse_state(whale.address)
+            state = hyperliquid_client.get_clearinghouse_state(whale.address, use_cache=True, ttl=10.0)
         except Exception:
             state = None
         if isinstance(state, dict):
