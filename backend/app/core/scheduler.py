@@ -9,7 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from app.db.session import SessionLocal
 from app.models import Whale
 from app.services.holdings_service import refresh_holdings_for_whales
-from app.services.metrics_service import recompute_all_wallet_metrics
+from app.services.metrics_service import recompute_all_wallet_metrics, rebuild_all_portfolio_histories
 from app.services.price_updater import update_prices
 from app.workers.classifier import classifier
 
@@ -28,6 +28,18 @@ def _refresh_holdings_and_metrics() -> None:
         logger.exception("scheduler: refresh_holdings_and_metrics failed")
         return
     logger.info("scheduler: refresh_holdings_and_metrics done in %.2fs", (datetime.now() - started).total_seconds())
+
+
+def _rebuild_histories_job() -> None:
+    started = datetime.now()
+    logger.info("scheduler: rebuild_histories start")
+    try:
+        with SessionLocal() as session:
+            rebuild_all_portfolio_histories(session)
+    except Exception:
+        logger.exception("scheduler: rebuild_histories failed")
+        return
+    logger.info("scheduler: rebuild_histories done in %.2fs", (datetime.now() - started).total_seconds())
 
 
 def _classify_whales() -> None:
@@ -70,6 +82,15 @@ def start_scheduler() -> BackgroundScheduler:
         minutes=30,
         next_run_time=datetime.now(),
         id="price_updater",
+        replace_existing=True,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        _rebuild_histories_job,
+        "cron",
+        hour=3,
+        minute=0,
+        id="rebuild_histories",
         replace_existing=True,
         coalesce=True,
     )

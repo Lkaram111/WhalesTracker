@@ -10,6 +10,16 @@
 - Adding whales now triggers an async backfill; responses return immediately with the whale `id`. Frontend can poll `/api/v1/whales/{whale_id}/backfill_status` to show progress (0-100) while historical data is imported.
 - Hyperliquid wallets can be fully reset/re-synced via `POST /api/v1/whales/{whale_id}/reset_hyperliquid`; it wipes trades/events/holdings/metrics then re-imports with progress visible via the same status endpoint.
 - Hyperliquid ingestion is incremental: we store the last ingested fill time per wallet and only fetch newer fills on subsequent runs.
+- Any wallet can be re-backfilled without wiping data via `POST /api/v1/whales/{whale_id}/backfill` (returns `BackfillStatus`).
+
+## Runbook (freshness & verification)
+- Start API with ingestors/scheduler: `ENABLE_INGESTORS=true ENABLE_SCHEDULER=true uvicorn app.main:app --reload --port 8000`
+- Check migrations applied: `alembic current`; apply with `alembic upgrade head`.
+- Verify ingestion health:
+  - Hyperliquid: watch logs for `Hyperliquid ingestor start` ticks; ensure `ingestion_checkpoints` rows grow.
+  - Ethereum/Bitcoin: logs should show ingestion ticks; confirm latest trade timestamps advance: `select max(timestamp) from trades;`
+- Backfill a wallet: `POST /api/v1/whales/{id}/backfill` (or reset for Hyperliquid via `/reset_hyperliquid`). Poll `/backfill_status`.
+- Rebuild chart history if empty: call `GET /api/v1/wallets/{chain}/{address}/roi-history` and `/portfolio-history`; they trigger rebuilds when missing.
 
 ## Frontend integration
 -Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned

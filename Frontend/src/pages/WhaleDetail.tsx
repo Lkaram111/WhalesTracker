@@ -31,12 +31,16 @@ export default function WhaleDetail() {
   const [roiHistory, setRoiHistory] = useState<{ timestamp: string; roi_percent: number }[]>([]);
   const [portfolioHistory, setPortfolioHistory] = useState<{ timestamp: string; value_usd: number }[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+  const [tradesError, setTradesError] = useState<string | null>(null);
 
   const [whaleId, setWhaleId] = useState<string | null>(null);
   const [backfillStatus, setBackfillStatus] = useState<BackfillStatus | null>(null);
   const [resetting, setResetting] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
   const [groupSimilarTrades, setGroupSimilarTrades] = useState(false);
+  const [backfillPending, setBackfillPending] = useState(false);
+  const [backfillError, setBackfillError] = useState<string | null>(null);
 
   const fillDailySeries = <T extends { timestamp: string }>(
     points: T[],
@@ -119,14 +123,17 @@ export default function WhaleDetail() {
     const source = tradeSource === 'all' ? undefined : tradeSource;
     const direction = tradeDirection === 'all' ? undefined : tradeDirection;
     setTradesLoading(true);
+    setTradesError(null);
     api.getWalletTrades(chain, address, source, direction, 200)
       .then((res) => {
         setTrades(res.items);
         setTradesNextCursor(res.next_cursor);
+        setLastRefreshed(new Date());
       })
       .catch(() => {
         setTrades([]);
         setTradesNextCursor(null);
+        setTradesError('Failed to load trades. Please refresh.');
       })
       .finally(() => setTradesLoading(false));
   }, [chain, address, tradeSource, tradeDirection, refreshKey]);
@@ -246,6 +253,30 @@ export default function WhaleDetail() {
     [trades, groupSimilarTrades]
   );
 
+  // Auto-refresh trades/positions/backfill every 30s
+  useEffect(() => {
+    if (!chain || !address) return;
+    const id = setInterval(() => setRefreshKey((k) => k + 1), 30000);
+    return () => clearInterval(id);
+  }, [chain, address]);
+
+  const handleManualRefresh = () => {
+    setRefreshKey((k) => k + 1);
+  };
+
+  const handleBackfill = async () => {
+    if (!whaleId) return;
+    setBackfillError(null);
+    setBackfillPending(true);
+    try {
+      const status = await api.backfillWhale(whaleId);
+      setBackfillStatus(status);
+    } catch (err) {
+      setBackfillError(err instanceof Error ? err.message : 'Failed to start backfill');
+      setBackfillPending(false);
+    }
+  };
+
   if (!chain || !address) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -272,6 +303,15 @@ export default function WhaleDetail() {
         <ArrowLeft className="h-4 w-4" />
         Back to Whales
       </Link>
+
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="text-xs text-muted-foreground">
+          Last refreshed: {lastRefreshed ? lastRefreshed.toLocaleTimeString() : 'n/a'}
+        </div>
+        <Button variant="outline" size="sm" onClick={handleManualRefresh} disabled={tradesLoading}>
+          {tradesLoading ? 'Refreshing…' : 'Refresh data'}
+        </Button>
+      </div>
 
       {/* Wallet Header */}
       <WalletHeader wallet={walletDetails.wallet} />
@@ -315,52 +355,99 @@ export default function WhaleDetail() {
           )}
         </div>
       )}
+      {chain !== 'hyperliquid' && (
+        <div className="card-glass rounded-xl p-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-foreground">Recompute & backfill history</h3>
+              <p className="text-xs text-muted-foreground">
+                Refreshes trades, holdings, and metrics for this wallet without wiping data.
+              </p>
+            </div>
+            <Button
+              size="sm"
+              onClick={handleBackfill}
+              disabled={!whaleId || backfillPending}
+              variant="outline"
+            >
+              {backfillPending ? 'Running…' : 'Recompute'}
+            </Button>
+          </div>
+          {backfillError && <p className="text-xs text-destructive">{backfillError}</p>}
+          {backfillStatus && backfillStatus.status !== 'idle' && (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <span>{backfillStatus.message || backfillStatus.status}</span>
+                <span className="font-medium text-foreground">{Math.round(backfillStatus.progress)}%</span>
+              </div>
+              <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-primary transition-all"
+                  style={{ width: `${Math.max(0, Math.min(100, backfillStatus.progress))}%` }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Metrics Grid */}
       <WalletMetricsGrid metrics={walletDetails.metrics} />
 
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <RoiChart
-          data={roiHistory}
-          actionSlot={
-            <div className="flex items-center gap-2">
-              {rangeOptions.map((option) => (
-                <button
-                  key={option.value}
-                  onClick={() => setRoiRange(option.value)}
-                  className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
-                    roiRange === option.value
-                      ? 'border-primary bg-primary/10 text-primary'
-                      : 'border-border text-muted-foreground hover:bg-muted'
-                  }`}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          }
-        />
-        <PortfolioChart
-          data={portfolioHistory}
-          actionSlot={
-            <div className="flex items-center gap-2">
-              {rangeOptions.map((option) => (
-                <button
-                  key={option.value}
-                  onClick={() => setPortfolioRange(option.value)}
-                  className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
-                    portfolioRange === option.value
-                      ? 'border-primary bg-primary/10 text-primary'
-                      : 'border-border text-muted-foreground hover:bg-muted'
-                  }`}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          }
-        />
+        <div className="space-y-3">
+          {roiHistory.length < 2 ? (
+            <div className="card-glass rounded-xl p-6 text-sm text-muted-foreground">No ROI data yet.</div>
+          ) : (
+            <RoiChart
+              data={roiHistory}
+              actionSlot={
+                <div className="flex items-center gap-2">
+                  {rangeOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      onClick={() => setRoiRange(option.value)}
+                      className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
+                        roiRange === option.value
+                          ? 'border-primary bg-primary/10 text-primary'
+                          : 'border-border text-muted-foreground hover:bg-muted'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              }
+            />
+          )}
+        </div>
+        <div className="space-y-3">
+          {portfolioHistory.length < 2 ? (
+            <div className="card-glass rounded-xl p-6 text-sm text-muted-foreground">No portfolio history yet.</div>
+          ) : (
+            <PortfolioChart
+              data={portfolioHistory}
+              actionSlot={
+                <div className="flex items-center gap-2">
+                  {rangeOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      onClick={() => setPortfolioRange(option.value)}
+                      className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
+                        portfolioRange === option.value
+                          ? 'border-primary bg-primary/10 text-primary'
+                          : 'border-border text-muted-foreground hover:bg-muted'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              }
+            />
+          )}
+        </div>
       </div>
 
       {/* Notes */}
@@ -488,6 +575,11 @@ export default function WhaleDetail() {
             </Button>
           </div>
         </div>
+        {tradesError && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            {tradesError}
+          </div>
+        )}
         <TradesTable trades={displayedTrades} groupingEnabled={groupSimilarTrades} />
         <div className="flex justify-center">
           {tradesNextCursor ? (

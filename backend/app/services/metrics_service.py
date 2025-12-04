@@ -298,6 +298,14 @@ def recompute_all_wallet_metrics(session: Session) -> None:
     _commit_with_retry(session)
 
 
+def rebuild_all_portfolio_histories(session: Session) -> None:
+    """Rebuild portfolio history for all whales from trades to restore charts."""
+    whales = session.query(Whale).all()
+    for whale in whales:
+        rebuild_portfolio_history_from_trades(session, whale)
+    _commit_with_retry(session)
+
+
 def touch_last_active(session: Session, whale: Whale, ts: datetime | None = None) -> None:
     whale.last_active_at = ts or datetime.now(timezone.utc)
     session.add(whale)

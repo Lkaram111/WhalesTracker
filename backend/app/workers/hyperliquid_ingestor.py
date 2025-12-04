@@ -97,9 +97,6 @@ class HyperliquidIngestor:
             if not whales:
                 logger.debug("No Hyperliquid whales configured; skipping tick")
                 return
-            if not any(w.labels for w in whales):
-                logger.debug("No hyperliquid labels; skipping tick")
-                return
             for whale in whales:
                 logger.info("HL ingest start whale=%s", whale.address)
                 wrote = self._process_account(session, chain.id, whale, max_pages=self.max_pages_per_tick)
@@ -145,7 +142,7 @@ class HyperliquidIngestor:
             return False
         try:
             fills = hyperliquid_client.get_user_fills_paginated(
-                whale.address, start_time=start_time, max_pages=max_pages
+                whale.address, start_time=None, max_pages=max_pages
             )
             self._clear_backoff(whale.address)
         except HTTPStatusError as exc:
@@ -155,25 +152,34 @@ class HyperliquidIngestor:
             fills = []
             self._record_backoff(whale.address, exc)
 
-        if fills:
-            progress(25.0, f"hyperliquid: processing {len(fills)} fills")
+        new_fills = [
+            f for f in fills if checkpoint.last_fill_time is None or (f.get("time") or 0) > checkpoint.last_fill_time
+        ]
+
+        if new_fills:
+            progress(25.0, f"hyperliquid: processing {len(new_fills)} fills")
             max_time = start_time or 0
-            # Ingest oldest → newest so autoincrement IDs follow chronological order
-            for fill in reversed(fills):
+            # Ingest oldest -> newest so autoincrement IDs follow chronological order
+            seen_tx: set[str] = set()
+            for fill in sorted(new_fills, key=lambda f: f.get("time") or 0):
                 tx_hash = fill.get("hash") or str(fill.get("tid") or fill.get("oid") or "")
                 if tx_hash:
+                    if tx_hash in seen_tx:
+                        continue
                     exists = session.scalar(
                         select(Trade.id).where(Trade.tx_hash == tx_hash, Trade.whale_id == whale.id)
                     )
                     if exists:
+                        seen_tx.add(tx_hash)
                         continue
+                    seen_tx.add(tx_hash)
                 ts_ms = fill.get("time") or 0
                 timestamp = datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone.utc) if ts_ms else now
                 sz = fill.get("sz")
                 px = fill.get("px")
                 coin = fill.get("coin") or fill.get("ticker") or "PERP"
                 try:
-                    amount_base = abs(float(sz))
+                    amount_base = float(sz)
                 except Exception:
                     amount_base = None
                 value_usd = None
@@ -240,9 +246,9 @@ class HyperliquidIngestor:
                         "details": {"tid": fill.get("tid"), "oid": fill.get("oid"), "fee": fill.get("fee")},
                     }
                 )
-            wrote = wrote or bool(fills)
+            wrote = wrote or bool(new_fills)
             try:
-                times = [int(f.get("time") or 0) for f in fills if f.get("time") is not None]
+                times = [int(f.get("time") or 0) for f in new_fills if f.get("time") is not None]
                 if times:
                     max_time = max(times)
             except Exception:
@@ -252,7 +258,7 @@ class HyperliquidIngestor:
             logger.info(
                 "HL ingest fills whale=%s processed=%s new_last_fill_time=%s",
                 whale.address,
-                len(fills),
+                len(new_fills),
                 checkpoint.last_fill_time,
             )
         else:

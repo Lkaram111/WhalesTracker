@@ -4,7 +4,7 @@ from fastapi import APIRouter
 from sqlalchemy import func, select, String
 
 from app.db.session import SessionLocal
-from app.models import Trade, Whale
+from app.models import Trade, Whale, WalletMetricsDaily, Chain
 from app.schemas.api import DashboardSummary
 
 router = APIRouter()
@@ -46,3 +46,22 @@ async def get_dashboard_summary() -> DashboardSummary:
             total_volume_24h_usd=float(volume_24h),
             hyperliquid_whales=int(hyperliquid_whales),
         )
+
+
+@router.get("/ingestion-status")
+async def ingestion_status() -> dict:
+    """Heartbeat: latest trade per chain and last daily snapshot."""
+    with SessionLocal() as session:
+        chains = {c.id: c.slug for c in session.query(Chain).all()}
+        latest_by_chain = {}
+        for chain_id, slug in chains.items():
+            ts = session.scalar(
+                select(func.max(Trade.timestamp)).where(Trade.chain_id == chain_id)
+            )
+            latest_by_chain[slug] = ts.isoformat() if ts else None
+        latest_daily = session.scalar(select(func.max(WalletMetricsDaily.date)))
+        return {
+            "latest_trade_by_chain": latest_by_chain,
+            "latest_wallet_metrics_daily": str(latest_daily) if latest_daily else None,
+            "total_trades": int(session.scalar(select(func.count()).select_from(Trade)) or 0),
+        }

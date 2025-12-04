@@ -349,3 +349,25 @@ def _reset_hyperliquid_sync(whale_id: str) -> None:
         except Exception as exc:
             session.rollback()
             backfill_progress.error(whale.id, f"error during backfill: {exc}")
+
+
+@router.post("/{whale_id}/backfill", response_model=BackfillStatus)
+async def trigger_backfill(whale_id: str) -> BackfillStatus:
+    """Re-run backfill for any chain without wiping data."""
+    with SessionLocal() as session:
+        whale = session.get(Whale, whale_id)
+        if not whale:
+            raise HTTPException(status_code=404, detail="Whale not found")
+        chain = session.get(Chain, whale.chain_id)
+        chain_slug = chain.slug if chain else None
+
+    asyncio.create_task(_run_backfill_async(whale_id))
+    now = datetime.now(timezone.utc)
+    return BackfillStatus(
+        whale_id=whale_id,
+        chain=chain_slug,
+        status="running",
+        progress=0.0,
+        message="backfill queued",
+        updated_at=now,
+    )

@@ -10,7 +10,10 @@ import type {
   BackfillStatus,
 } from '@/types/api';
 
-const baseUrl = import.meta.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+const baseUrl =
+  import.meta.env.VITE_API_BASE_URL ||
+  import.meta.env.NEXT_PUBLIC_API_BASE_URL ||
+  'http://localhost:8000';
 
 async function apiGet<T>(path: string): Promise<T> {
   const res = await fetch(`${baseUrl}${path}`, {
@@ -55,6 +58,8 @@ export const api = {
     apiGet<{ items: LiveEvent[] }>(`/api/v1/events/live?limit=${limit}`),
   getWalletDetails: (chain: string, address: string) =>
     apiGet<WalletDetails>(`/api/v1/wallets/${chain}/${address}`),
+  backfillWhale: (whaleId: string) =>
+    apiPost<BackfillStatus>(`/api/v1/whales/${whaleId}/backfill`, {}),
   getWalletPositions: (chain: string, address: string) =>
     apiGet<{ items: import('@/types/api').OpenPosition[] }>(
       `/api/v1/wallets/${chain}/${address}/positions`

@@ -47,11 +47,16 @@ def refresh_eth_holdings(session: Session, whale: Whale, chain: Chain) -> None:
     eth_price = _eth_price_usd()
     value_usd = Decimal(eth_price) * eth_amount if eth_price is not None else None
 
-    holding = (
+    existing = (
         session.query(Holding)
         .filter(Holding.whale_id == whale.id, Holding.asset_symbol == "ETH")
-        .one_or_none()
+        .order_by(Holding.id.asc())
+        .all()
     )
+    holding = existing[0] if existing else None
+    # clean up accidental duplicates
+    for dup in existing[1:]:
+        session.delete(dup)
 
     if holding:
         holding.amount = eth_amount
@@ -88,11 +93,16 @@ def refresh_eth_holdings(session: Session, whale: Whale, chain: Chain) -> None:
         value_usd = Decimal(price_usd) * amount if price_usd is not None else None
 
         asset_symbol = str(meta.get("symbol") or token_address[:6])
-        holding = (
+        existing = (
             session.query(Holding)
             .filter(Holding.whale_id == whale.id, Holding.asset_symbol == asset_symbol)
-            .one_or_none()
+            .order_by(Holding.id.asc())
+            .all()
         )
+        holding = existing[0] if existing else None
+        for dup in existing[1:]:
+            session.delete(dup)
+
         if holding:
             holding.amount = amount
             holding.value_usd = value_usd
@@ -124,11 +134,15 @@ def refresh_btc_holdings(session: Session, whale: Whale, chain: Chain) -> None:
     btc_price = _btc_price_usd()
     value_usd = Decimal(btc_price) * btc_amount if btc_price is not None else None
 
-    holding = (
+    existing = (
         session.query(Holding)
         .filter(Holding.whale_id == whale.id, Holding.asset_symbol == "BTC")
-        .one_or_none()
+        .order_by(Holding.id.asc())
+        .all()
     )
+    holding = existing[0] if existing else None
+    for dup in existing[1:]:
+        session.delete(dup)
 
     if holding:
         holding.amount = btc_amount

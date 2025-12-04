@@ -227,12 +227,21 @@ async def get_roi_history(
         from app.models import WalletMetricsDaily
 
         since = datetime.now(timezone.utc).date() - timedelta(days=days)
-        rows = (
-            session.query(WalletMetricsDaily)
-            .filter(WalletMetricsDaily.whale_id == whale.id, WalletMetricsDaily.date >= since)
-            .order_by(WalletMetricsDaily.date.asc())
-            .all()
-        )
+
+        def _fetch():
+            return (
+                session.query(WalletMetricsDaily)
+                .filter(WalletMetricsDaily.whale_id == whale.id, WalletMetricsDaily.date >= since)
+                .order_by(WalletMetricsDaily.date.asc())
+                .all()
+            )
+
+        rows = _fetch()
+        if not rows:
+            rebuild_portfolio_history_from_trades(session, whale)
+            recompute_wallet_metrics(session, whale)
+            _commit_with_retry(session)
+            rows = _fetch()
         points = [
             {"timestamp": datetime.combine(r.date, datetime.min.time(), tzinfo=timezone.utc), "roi_percent": float(r.roi_percent or 0)}
             for r in rows
