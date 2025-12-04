@@ -115,6 +115,7 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
         }
         entry_dirs = {TradeDirection.LONG, TradeDirection.SHORT, TradeDirection.BUY}
         ignore_dirs = {TradeDirection.DEPOSIT}
+        asset_filter = [sym.upper() for sym in payload.asset_symbols] if payload.asset_symbols else None
 
         trade_query = (
             session.query(Trade)
@@ -125,13 +126,11 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
             trade_query = trade_query.filter(Trade.timestamp >= payload.start)
         if payload.end:
             trade_query = trade_query.filter(Trade.timestamp <= payload.end)
-        if payload.asset_symbols:
-            trade_query = trade_query.filter(Trade.base_asset.in_(payload.asset_symbols))
+        if asset_filter:
+            trade_query = trade_query.filter(Trade.base_asset.in_(asset_filter))
         if payload.max_trades is not None:
             trade_query = trade_query.limit(payload.max_trades)
         trades = trade_query.all()
-        if not trades:
-            raise HTTPException(status_code=404, detail="No trades available for backtest")
 
         entry_query = (
             session.query(Trade.value_usd)
@@ -159,8 +158,30 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
 
         # preload price history for marking open positions (best-effort)
         assets = {t.base_asset for t in trades if t.base_asset}
-        assets_used = payload.asset_symbols or sorted(assets)
+        assets_used = asset_filter or sorted(assets)
         price_cache: dict[str, list[tuple[datetime, Decimal]]] = {}
+
+        # Gracefully return an empty backtest instead of 404 when no trades match filters.
+        if not trades:
+            empty_summary = BacktestSummary(
+                initial_deposit_usd=float(initial_deposit),
+                recommended_position_pct=recommended_pct * 100.0,
+                used_position_pct=used_pct * 100.0,
+                leverage_used=float(leverage),
+                asset_symbols=assets_used,
+                total_fees_usd=0.0,
+                total_slippage_usd=0.0,
+                gross_pnl_usd=0.0,
+                net_pnl_usd=0.0,
+                roi_percent=0.0,
+                trades_copied=0,
+                win_rate_percent=None,
+                max_drawdown_percent=0.0,
+                max_drawdown_usd=0.0,
+                start=None,
+                end=None,
+            )
+            return CopierBacktestResponse(summary=empty_summary, trades=[], equity_curve=[], price_points=None)
 
         # determine backtest window for price fetch
         start_ts = trades[0].timestamp.replace(second=0, microsecond=0) if trades else None
