@@ -21,6 +21,7 @@ from app.models import (
     Whale,
 )
 from app.services.hyperliquid_client import hyperliquid_client
+from app.core.time_utils import now
 
 
 def _safe_sum(values: Iterable[Decimal | None]) -> Decimal:
@@ -32,7 +33,7 @@ def _safe_sum(values: Iterable[Decimal | None]) -> Decimal:
 
 
 def _volume_and_count_last_30d(session: Session, whale_id: str, days: int = 30) -> tuple[Decimal, int]:
-    window_start = datetime.now(timezone.utc) - timedelta(days=days)
+    window_start = now() - timedelta(days=days)
     trades = (
         session.query(Trade.value_usd)
         .filter(Trade.whale_id == whale_id, Trade.timestamp >= window_start)
@@ -227,7 +228,7 @@ def recompute_wallet_metrics(session: Session, whale: Whale) -> None:
         },
     )
 
-    today = date.today()
+    today = now().date()
     pending_daily = next(
         (
             d
@@ -286,7 +287,7 @@ def _upsert_current_metrics(session: Session, payload: dict[str, Any]) -> None:
         if metrics:
             for key, value in update_values.items():
                 setattr(metrics, key, value)
-            metrics.updated_at = datetime.now(timezone.utc)
+            metrics.updated_at = now()
         else:
             session.add(CurrentWalletMetrics(**payload))
 

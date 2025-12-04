@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { LiveEventList } from '@/components/domain/live/LiveEventList';
 import { ChainBadge } from '@/components/common/ChainBadge';
 import { useUIStore } from '@/stores/uiStore';
@@ -29,37 +29,35 @@ export default function LiveFeed() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [newEventIds, setNewEventIds] = useState<Set<string>>(new Set());
 
-  const fetchEvents = async () => {
+  const fetchEvents = useCallback(async () => {
     setIsRefreshing(true);
     try {
       const res = await api.getLiveEvents(100);
       const incoming = res.items || [];
-      const existingIds = new Set(events.map((e) => e.id));
-      const newcomers = incoming.filter((e) => !existingIds.has(e.id));
-      if (newcomers.length > 0) {
+      setEvents((prevEvents) => {
+        const existingIds = new Set(prevEvents.map((e) => e.id));
+        const newcomers = incoming.filter((e) => !existingIds.has(e.id));
         setNewEventIds(new Set(newcomers.map((e) => e.id)));
-      }
-      setEvents(incoming);
+        return incoming;
+      });
       setLastUpdated(new Date());
     } catch {
       // keep old events on error
     } finally {
       setIsRefreshing(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchEvents();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fetchEvents]);
 
   // Auto-refresh when live is not paused
   useEffect(() => {
     if (liveFeedPaused) return;
     const id = setInterval(fetchEvents, 10000);
     return () => clearInterval(id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveFeedPaused]);
+  }, [liveFeedPaused, fetchEvents]);
 
   const filteredEvents = useMemo(() => {
     return events.filter((event) => {
