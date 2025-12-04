@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/apiClient';
-import type { BacktestRunSummary, ChainId, LiveTrade, WhaleSummary } from '@/types/api';
+import type { BacktestRunSummary, ChainId, WhaleSummary } from '@/types/api';
 import { formatUSDExact, formatPercent, formatDate, formatAddress } from '@/lib/formatters';
 import { cn } from '@/lib/utils';
 import { Loader2, Play, Square, Radio, ArrowRight } from 'lucide-react';
+import { useCopierStore } from '@/stores/copierStore';
+import { CopierCard } from '@/components/domain/copier/CopierCard';
 
 const chainOptions: ChainId[] = ['hyperliquid', 'ethereum', 'bitcoin'];
 
@@ -14,29 +16,31 @@ export default function LiveCopier() {
   const [runs, setRuns] = useState<BacktestRunSummary[]>([]);
   const [loadingRuns, setLoadingRuns] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
-  const [live, setLive] = useState(false);
-  const [feed, setFeed] = useState<LiveTrade[]>([]);
   const [positionPctOverride, setPositionPctOverride] = useState<number | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastTsRef = useRef<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
-  const [sessionId, setSessionId] = useState<number | null>(null);
-  const [status, setStatus] = useState<{ processed: number; errors: string[]; notifications: string[] }>({
-    processed: 0,
-    errors: [],
-    notifications: [],
-  });
-  const sessionStorageKey = 'liveCopierSession';
+  const [starting, setStarting] = useState(false);
+
+  const { startCopier, stopCopier, copiers } = useCopierStore((s) => ({
+    startCopier: s.startCopier,
+    stopCopier: s.stopCopier,
+    copiers: s.copiers,
+  }));
+
+  const copierList = useMemo(() => Object.values(copiers).sort((a, b) => b.createdAt - a.createdAt), [copiers]);
+  const activeCount = copierList.filter((c) => c.active).length;
+  const [focusedSessionId, setFocusedSessionId] = useState<number | null>(null);
+
+  const selectedRun = useMemo(() => runs.find((r) => r.id === selectedRunId) || null, [runs, selectedRunId]);
+  const focusedCopier = focusedSessionId ? copiers[focusedSessionId] : null;
 
   useEffect(() => {
     const params = new URLSearchParams();
     params.set('limit', '200');
-    api.getWhales(params)
+    api
+      .getWhales(params)
       .then((res) => setWhales(res.items || []))
       .catch(() => setWhales([]));
   }, []);
-
-  const selectedRun = useMemo(() => runs.find((r) => r.id === selectedRunId) || null, [runs, selectedRunId]);
 
   const loadRuns = async (c: ChainId, addr: string) => {
     setLoadingRuns(true);
@@ -66,125 +70,50 @@ export default function LiveCopier() {
     }
   }, [chain, address]);
 
-  // Restore an active copier session if it exists (after refresh/navigation)
   useEffect(() => {
-    const restore = async () => {
-      if (!chain || !address) return;
-      try {
-        const active = await api.listActiveCopierSessions(chain, address);
-        if (active && active.length > 0) {
-          const sess = active[0];
-          setSessionId(sess.session_id);
-          setLive(sess.active);
-          setStatus({
-            processed: sess.processed,
-            errors: sess.errors || [],
-            notifications: sess.notifications || [],
-          });
-          // restart polling from scratch
-          lastTsRef.current = undefined;
-        }
-      } catch (err) {
-        // ignore restore errors
-      }
-    };
-    restore();
-  }, [chain, address]);
-
-  const startLive = () => {
-    if (!selectedRun || !address) return;
-    setError(null);
-    setFeed([]);
-    lastTsRef.current = undefined;
-    api.startCopierSession({
-      chain,
-      address,
-      run_id: selectedRun.id,
-      execute: false,
-      position_size_pct: positionPctOverride,
-    })
-      .then((res) => {
-        setSessionId(res.session_id);
-        setLive(true);
-        setStatus({ processed: res.processed, errors: res.errors || [], notifications: res.notifications || [] });
-        try {
-          const payload = { session_id: res.session_id, chain, address };
-          localStorage.setItem(sessionStorageKey, JSON.stringify(payload));
-        } catch (_) {
-          // ignore storage issues
-        }
-      })
-      .catch((err: any) => {
-        setError(err?.message || 'Failed to start session');
-        setLive(false);
-      });
-  };
-
-  const stopLive = () => {
-    setLive(false);
-    if (pollRef.current) clearInterval(pollRef.current);
-    if (sessionId !== null) {
-        api.stopCopierSession(sessionId).catch(() => {});
-    }
-    lastTsRef.current = undefined;
-    try {
-      localStorage.removeItem(sessionStorageKey);
-    } catch (_) {
-      // ignore storage issues
-    }
-  };
-
-  // poll trades every second when live
-  useEffect(() => {
-    if (!live || !selectedRun || !chain || !address) {
-      if (pollRef.current) clearInterval(pollRef.current);
+    if (focusedSessionId && copiers[focusedSessionId]) return;
+    if (!focusedSessionId && copierList.length) {
+      setFocusedSessionId(copierList[0].sessionId);
       return;
     }
-    const tick = async () => {
-      try {
-        const res = await api.getLiveTrades(chain, address, lastTsRef.current);
-        const newTrades = res.trades || [];
-        if (newTrades.length) {
-          setFeed((prev) => [...prev, ...newTrades]);
-          const last = newTrades[newTrades.length - 1];
-          lastTsRef.current = last.timestamp;
-        }
-        if (sessionId !== null) {
-          try {
-            const st = await api.getCopierSessionStatus(sessionId);
-            setStatus({ processed: st.processed, errors: st.errors || [], notifications: st.notifications || [] });
-            if (!st.active) setLive(false);
-          } catch (_) {
-            // ignore status errors
-          }
-        }
-      } catch (err) {
-        // ignore for now
-      }
-    };
-    tick();
-    pollRef.current = setInterval(tick, 1000);
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [live, selectedRun, chain, address, sessionId]);
-
-  // On first render, attempt to reattach to a stored session id
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(sessionStorageKey);
-      if (!raw) return;
-      const stored = JSON.parse(raw);
-      if (stored?.session_id && stored.chain === chain && stored.address === address) {
-        setSessionId(stored.session_id);
-        setLive(true);
+    if (focusedSessionId && !copiers[focusedSessionId]) {
+      if (copierList.length) {
+        setFocusedSessionId(copierList[0].sessionId);
       } else {
-        localStorage.removeItem(sessionStorageKey);
+        setFocusedSessionId(null);
       }
-    } catch (_) {
-      // ignore storage errors
     }
-  }, [chain, address]);
+  }, [focusedSessionId, copiers, copierList]);
+
+  const handleStart = async () => {
+    if (!selectedRun || !address) return;
+    setError(null);
+    setStarting(true);
+    try {
+      const whaleLabel = whales.find((w) => w.address === address)?.labels?.[0] ?? null;
+      const session = await startCopier({
+        chain,
+        address,
+        runId: selectedRun.id,
+        positionSizePct: positionPctOverride,
+        execute: false,
+        label: whaleLabel,
+      });
+      setFocusedSessionId(session.sessionId);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to start session');
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const handleStopFocused = () => {
+    if (focusedSessionId) {
+      void stopCopier(focusedSessionId);
+    }
+  };
+
+  const liveFeed = focusedCopier?.feed ?? [];
 
   return (
     <div className="space-y-6 animate-fade-up">
@@ -194,8 +123,8 @@ export default function LiveCopier() {
           <p className="text-muted-foreground">Pick a backtested preset and shadow the whale in real-time.</p>
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Radio className={cn('h-4 w-4', live ? 'text-success animate-pulse' : 'text-muted-foreground')} />
-          {live ? 'Polling every second' : 'Idle'}
+          <Radio className={cn('h-4 w-4', activeCount ? 'text-success animate-pulse' : 'text-muted-foreground')} />
+          {activeCount ? `${activeCount} active copier${activeCount > 1 ? 's' : ''}` : 'Idle'}
         </div>
       </div>
 
@@ -282,30 +211,48 @@ export default function LiveCopier() {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={live ? stopLive : startLive}
-              disabled={!selectedRun || loadingRuns}
+              onClick={handleStart}
+              disabled={!selectedRun || loadingRuns || starting}
               className={cn(
                 'inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold transition-colors',
-                live
-                  ? 'bg-destructive/10 text-destructive border border-destructive/40'
-                  : 'bg-primary text-primary-foreground hover:bg-primary/90'
+                'bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50'
               )}
             >
-              {live ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-              {live ? 'Stop' : 'Start Live Copy'}
+              <Play className="h-4 w-4" />
+              Start Whale Copier
             </button>
-            {loadingRuns && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+            {focusedCopier && (
+              <button
+                type="button"
+                onClick={handleStopFocused}
+                disabled={!focusedCopier.active}
+                className={cn(
+                  'inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition-colors',
+                  focusedCopier.active
+                    ? 'border-destructive/40 text-destructive hover:bg-destructive/10'
+                    : 'border-border text-muted-foreground'
+                )}
+              >
+                <Square className="h-4 w-4" />
+                Stop Focused
+              </button>
+            )}
+            {(loadingRuns || starting) && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
           </div>
 
           {error && <div className="text-sm text-destructive">{error}</div>}
-          {sessionId && (
+          {focusedCopier && (
             <div className="text-xs text-muted-foreground">
-              Session #{sessionId} - processed {status.processed} trades
-              {status.errors.length > 0 && (
-                <div className="text-destructive mt-1">Last error: {status.errors[status.errors.length - 1]}</div>
+              Session #{focusedCopier.sessionId} - processed {focusedCopier.status.processed} trades
+              {focusedCopier.status.errors.length > 0 && (
+                <div className="text-destructive mt-1">
+                  Last error: {focusedCopier.status.errors[focusedCopier.status.errors.length - 1]}
+                </div>
               )}
-              {status.notifications.length > 0 && (
-                <div className="mt-1 text-foreground">Note: {status.notifications[status.notifications.length - 1]}</div>
+              {focusedCopier.status.notifications.length > 0 && (
+                <div className="mt-1 text-foreground">
+                  Note: {focusedCopier.status.notifications[focusedCopier.status.notifications.length - 1]}
+                </div>
               )}
             </div>
           )}
@@ -358,15 +305,38 @@ export default function LiveCopier() {
           </div>
 
           <div className="card-glass rounded-xl p-4">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-md font-semibold text-foreground">Live feed</h3>
-              <span className="text-xs text-muted-foreground">Updates every second</span>
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+              <div className="flex items-center gap-2">
+                <h3 className="text-md font-semibold text-foreground">Live feed</h3>
+                {focusedCopier && (
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+                    Session #{focusedCopier.sessionId}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">Viewing</span>
+                <select
+                  value={focusedSessionId ?? ''}
+                  onChange={(e) => setFocusedSessionId(e.target.value ? Number(e.target.value) : null)}
+                  className="rounded-lg border border-border bg-background px-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+                >
+                  <option value="">-- choose copier --</option>
+                  {copierList.map((c) => (
+                    <option key={c.sessionId} value={c.sessionId}>
+                      Session #{c.sessionId} · {formatAddress(c.address)} · {c.chain}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
-            {feed.length === 0 ? (
-              <div className="text-sm text-muted-foreground">No trades yet. Start live copy to begin tracking.</div>
+            {liveFeed.length === 0 ? (
+              <div className="text-sm text-muted-foreground">
+                {focusedCopier ? 'No trades yet for this session.' : 'Start a whale copier and select it to see trades here.'}
+              </div>
             ) : (
               <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
-                {feed.slice(-100).reverse().map((t) => (
+                {liveFeed.slice(-100).reverse().map((t) => (
                   <div key={t.id} className="flex items-center justify-between rounded-lg border border-border/50 px-3 py-2">
                     <div className="flex flex-col">
                       <span className="text-xs text-muted-foreground">{formatDate(t.timestamp)}</span>
@@ -382,7 +352,31 @@ export default function LiveCopier() {
           </div>
         </div>
       </div>
+
+      <div className="card-glass rounded-xl p-4">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-md font-semibold text-foreground">Active copier sessions</h3>
+          <span className="text-xs text-muted-foreground">
+            {activeCount} live · {copierList.length} total
+          </span>
+        </div>
+        {copierList.length === 0 ? (
+          <div className="text-sm text-muted-foreground">
+            Start a whale copier to spin up a card. Sessions keep running while you browse other pages.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {copierList.map((c) => (
+              <CopierCard
+                key={c.sessionId}
+                copier={c}
+                onFocus={setFocusedSessionId}
+                isFocused={focusedSessionId === c.sessionId}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
-

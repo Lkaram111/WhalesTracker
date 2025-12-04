@@ -1,5 +1,6 @@
 import { Sidebar } from './Sidebar';
 import { TopNav } from './TopNav';
+import { CopierDock } from '@/components/domain/copier/CopierDock';
 import { useUIStore } from '@/stores/uiStore';
 import { cn } from '@/lib/utils';
 
@@ -14,6 +15,7 @@ export function AppLayout({ children }: AppLayoutProps) {
     <div className="min-h-screen bg-background">
       <Sidebar />
       <TopNav />
+      <CopierDock />
       <main className={cn(
         'min-h-screen pt-16 transition-all duration-300',
         sidebarCollapsed ? 'pl-16' : 'pl-64'
