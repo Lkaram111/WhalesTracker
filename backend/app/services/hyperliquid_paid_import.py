@@ -49,7 +49,13 @@ def _maybe_float(val) -> float | None:
         return None
 
 
-def _process_fill(session: Session, whale: Whale, chain_id: int, fill: dict) -> bool:
+def _process_fill(
+    session: Session,
+    whale: Whale,
+    chain_id: int,
+    fill: dict,
+    existing_tx_hashes: set[str],
+) -> bool:
     ts_ms = fill.get("time") or fill.get("timestamp")
     if not ts_ms:
         return False
@@ -73,8 +79,7 @@ def _process_fill(session: Session, whale: Whale, chain_id: int, fill: dict) -> 
     tid = fill.get("tid")
     tx_hash = f"{raw_hash}:{tid}" if tid is not None else raw_hash or str(fill.get("oid") or "")
     if tx_hash:
-        exists = session.scalar(select(Trade.id).where(Trade.tx_hash == tx_hash, Trade.whale_id == whale.id))
-        if exists:
+        if tx_hash in existing_tx_hashes:
             return False
 
     trade = Trade(
@@ -95,6 +100,8 @@ def _process_fill(session: Session, whale: Whale, chain_id: int, fill: dict) -> 
         external_url=None,
     )
     session.add(trade)
+    if tx_hash:
+        existing_tx_hashes.add(tx_hash)
     return True
 
 
@@ -204,6 +211,7 @@ def import_hl_history_from_s3(
     keys_to_process: list[str] = []
     seen_keys: set[str] = set()
     wallet_lower = whale.address.lower()
+    processed_marker_root = cache_root / "processed" / wallet_lower
     s3_available = True
     def _emit(progress: float | None = None, message: str | None = None) -> None:
         if progress_cb:
@@ -238,6 +246,13 @@ def import_hl_history_from_s3(
     keys_to_process.sort()
     _emit(5.0, f"Found {listed_files} files ({listed_from_cache} cached)")
 
+    existing_tx_hashes = set(
+        h[0]
+        for h in session.query(Trade.tx_hash)
+        .filter(Trade.whale_id == whale.id, Trade.tx_hash.isnot(None))
+        .all()
+    )
+
     def _read_cached_file(path: Path) -> bool:
         nonlocal imported, skipped
         try:
@@ -257,7 +272,7 @@ def import_hl_history_from_s3(
                         continue
 
                     for fill in _iter_wallet_fills_from_line(parsed, wallet_lower):
-                        if _process_fill(session, whale, chain.id, fill):
+                        if _process_fill(session, whale, chain.id, fill, existing_tx_hashes):
                             imported += 1
                         else:
                             skipped += 1
@@ -280,6 +295,16 @@ def import_hl_history_from_s3(
     for key in keys_to_process:
         cached_path = cache_root / key
         cached_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path = (processed_marker_root / key).with_name(f"{Path(key).name}.processed")
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if cached_path.exists() and marker_path.exists():
+            reused_files += 1
+            processed_keys += 1
+            pct = 5.0 + (processed_keys / total_keys) * 90.0
+            _emit(pct, f"Skipped already processed file {key}")
+            continue
+
         needs_download = not cached_path.exists() or cached_path.stat().st_size == 0
         if needs_download:
             if not s3_available:
@@ -300,8 +325,6 @@ def import_hl_history_from_s3(
                 s3_errors.append(f"Failed to download {key}: {exc}")
                 missing_files += 1
                 continue
-            else:
-                reused_files += 1
 
         read_ok = _read_cached_file(cached_path)
         if not read_ok:
@@ -322,6 +345,7 @@ def import_hl_history_from_s3(
             if not read_ok:
                 missing_files += 1
                 continue
+        marker_path.touch()
         session.flush()
         processed_keys += 1
         pct = 5.0 + (processed_keys / total_keys) * 90.0
