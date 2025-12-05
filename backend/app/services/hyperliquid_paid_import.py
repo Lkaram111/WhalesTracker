@@ -12,7 +12,7 @@ import boto3
 import lz4.frame
 from botocore.exceptions import NoCredentialsError
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.models import Chain, Trade, TradeDirection, TradeSource, Whale
@@ -346,7 +346,14 @@ def import_hl_history_from_s3(
                 missing_files += 1
                 continue
         marker_path.touch()
-        session.flush()
+        try:
+            session.flush()
+            _commit_with_retry(session)
+        except OperationalError as exc:
+            # Deadlocks can happen on MySQL under concurrent writes; skip this file and continue.
+            session.rollback()
+            s3_errors.append(f"DB error while inserting {key}: {exc}")
+            continue
         processed_keys += 1
         pct = 5.0 + (processed_keys / total_keys) * 90.0
         _emit(pct, f"Processed {processed_keys}/{total_keys} files (imported {imported}, skipped {skipped})")
