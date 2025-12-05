@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.models import Chain, Trade, TradeDirection, TradeSource, Whale
 from app.services.metrics_service import recompute_wallet_metrics, _commit_with_retry, rebuild_portfolio_history_from_trades
 from app.core.time_utils import now
+from app.core.config import settings
 from app.services.backfill_progress import BackfillProgressTracker
 
 
@@ -149,7 +150,13 @@ def import_hl_history_from_s3(
     if not chain:
         return {"imported": 0, "skipped": 0, "missing_chain": True}
 
-    s3 = boto3.client("s3")
+    # Use AWS profile from settings or environment variable
+    aws_profile = settings.aws_profile or os.environ.get("AWS_PROFILE")
+    if aws_profile:
+        boto3_session = boto3.Session(profile_name=aws_profile)
+        s3 = boto3_session.client("s3")
+    else:
+        s3 = boto3.client("s3")
     bucket = "hl-mainnet-node-data"
     cache_root = Path(__file__).resolve().parent.parent / "data" / "hyperliquid_s3"
     prefixes = []
