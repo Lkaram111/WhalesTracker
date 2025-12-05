@@ -12,6 +12,7 @@ import boto3
 import lz4.frame
 from botocore.exceptions import NoCredentialsError
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models import Chain, Trade, TradeDirection, TradeSource, Whale
@@ -265,6 +266,10 @@ def import_hl_history_from_s3(
             return False
         except EOFError:
             return False
+        except SQLAlchemyError:
+            # Ensure DB errors don't leave the session in a broken state.
+            session.rollback()
+            raise
         except Exception:
             # Any unexpected read error should not break the whole import.
             return False

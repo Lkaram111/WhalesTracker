@@ -30,6 +30,18 @@ def upgrade() -> None:
             AND tx_hash IS NOT NULL
             """
         )
+    elif dialect in {"mysql"}:
+        # MariaDB/MySQL syntax requires an explicit FROM target with JOIN
+        op.execute(
+            """
+            DELETE t FROM trades t
+            JOIN trades t2
+              ON t.tx_hash IS NOT NULL
+             AND t.whale_id = t2.whale_id
+             AND t.tx_hash = t2.tx_hash
+             AND t.id > t2.id
+            """
+        )
     else:
         op.execute(
             """

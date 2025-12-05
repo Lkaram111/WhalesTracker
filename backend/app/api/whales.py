@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 import asyncio
 
 from fastapi import APIRouter, Query, HTTPException
-from sqlalchemy import and_, func, or_, select, String, cast
+from sqlalchemy import and_, func, or_, select, String, cast, case
 from sqlalchemy.exc import OperationalError
 
 from app.db.session import SessionLocal
@@ -117,10 +117,13 @@ async def list_whales(
         elif sortBy == "last_active_at":
             sort_column = Whale.last_active_at
 
-        if sortDir and sortDir.lower() == "asc":
-            query = query.order_by(sort_column.asc().nullslast())
+        is_desc = not (sortDir and sortDir.lower() == "asc")
+        # Emulate NULLS LAST for databases like MySQL/MariaDB that don't support it.
+        nulls_last = case((sort_column.is_(None), 1), else_=0)
+        if is_desc:
+            query = query.order_by(nulls_last.asc(), sort_column.desc())
         else:
-            query = query.order_by(sort_column.desc().nullslast())
+            query = query.order_by(nulls_last.asc(), sort_column.asc())
 
         total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
         rows = session.execute(query.offset(offset).limit(limit)).all()
@@ -359,6 +362,7 @@ async def _reset_hyperliquid_async(whale_id: str) -> None:
 
 
 def _reset_hyperliquid_sync(whale_id: str) -> None:
+    # Wipe in one session, then re-import in a fresh session to avoid stale/deleted instances.
     with SessionLocal() as session:
         whale = session.get(Whale, whale_id)
         if not whale:
@@ -366,10 +370,9 @@ def _reset_hyperliquid_sync(whale_id: str) -> None:
         chain = session.get(Chain, whale.chain_id)
         if not chain or chain.slug != "hyperliquid":
             return
-
         backfill_progress.start(whale.id, chain.slug)
         try:
-            # Wipe related data
+            session.rollback()  # ensure clean state
             session.query(Trade).filter(Trade.whale_id == whale.id).delete(synchronize_session=False)
             session.query(Event).filter(Event.whale_id == whale.id).delete(synchronize_session=False)
             session.query(Holding).filter(Holding.whale_id == whale.id).delete(synchronize_session=False)
@@ -386,6 +389,14 @@ def _reset_hyperliquid_sync(whale_id: str) -> None:
         except Exception as exc:
             session.rollback()
             backfill_progress.error(whale.id, f"error during reset: {exc}")
+            return
+
+    # Fresh session for backfill to avoid touching deleted ORM instances
+    with SessionLocal() as session:
+        whale = session.get(Whale, whale_id)
+        chain = session.get(Chain, whale.chain_id) if whale else None
+        if not whale or not chain or chain.slug != "hyperliquid":
+            backfill_progress.error(whale_id, "error during backfill: whale missing after reset")
             return
 
         def progress_cb(pct: float, message: str | None = None) -> None:

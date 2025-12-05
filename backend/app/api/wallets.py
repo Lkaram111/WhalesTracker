@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 import time
+import asyncio
 
 from fastapi import APIRouter, HTTPException, Path, Query
 from sqlalchemy import and_, func, or_, select
@@ -191,7 +192,7 @@ def _serialize_trades(trades: Iterable[Trade], chain_slug: str):
     return items
 
 
-def _sync_hyperliquid_activity(session, whale: Whale, chain_obj: Chain, max_pages: int = 10) -> None:
+def _sync_hyperliquid_activity(session, whale: Whale, chain_obj: Chain, max_pages: int = 5) -> None:
     """Fetch and store any missing recent fills so the whale page reflects latest activity."""
     if chain_obj.slug != "hyperliquid":
         return
@@ -201,9 +202,15 @@ def _sync_hyperliquid_activity(session, whale: Whale, chain_obj: Chain, max_page
             Trade.source == TradeSource.HYPERLIQUID,
         )
     )
-    # If we've never synced, start from a recent window to avoid paging through years of fills.
-    lookback_start = now() - timedelta(days=60)
-    start_time = int(last_ts.timestamp() * 1000) if last_ts else int(lookback_start.timestamp() * 1000)
+    # If we've never synced, start far back and allow more pages so we actually backfill trades.
+    if last_ts is None:
+        start_time = 0  # full history
+        max_pages = max_pages * 4  # initial backfill allows more pages
+    else:
+        # Skip sync when we have very recent fills to avoid blocking each request.
+        if last_ts >= now() - timedelta(minutes=5):
+            return
+        start_time = int(last_ts.timestamp() * 1000)
     try:
         fills = hyperliquid_client.get_user_fills_paginated(
             whale.address,
@@ -291,6 +298,28 @@ def _sync_hyperliquid_activity(session, whale: Whale, chain_obj: Chain, max_page
         _commit_with_retry(session)
 
 
+async def _sync_hyperliquid_activity_async(whale_id: str) -> None:
+    """Fire-and-forget wrapper so wallet detail doesn't block on Hyperliquid sync."""
+    def _worker() -> None:
+        with SessionLocal() as session:
+            whale = session.get(Whale, whale_id)
+            if not whale:
+                return
+            chain_obj = session.get(Chain, whale.chain_id)
+            if not chain_obj:
+                return
+            try:
+                _sync_hyperliquid_activity(session, whale, chain_obj)
+            except Exception:
+                session.rollback()
+
+    try:
+        await asyncio.to_thread(_worker)
+    except Exception:
+        # best-effort; swallow errors so requests continue
+        return
+
+
 @router.get(
     "/{chain}/{address}",
     response_model=WalletDetail,
@@ -301,11 +330,8 @@ async def get_wallet_detail(
 ) -> WalletDetail:
     with SessionLocal() as session:
         whale, chain_obj = _resolve_whale(session, chain, address)
-        try:
-            _sync_hyperliquid_activity(session, whale, chain_obj)
-        except Exception:
-            # best-effort; don't break wallet detail on sync failure
-            pass
+        # Kick off Hyperliquid sync in the background to avoid blocking the response.
+        asyncio.create_task(_sync_hyperliquid_activity_async(str(whale.id)))
         cm = _ensure_metrics_up_to_date(session, whale)
         holdings = session.query(Holding).filter(Holding.whale_id == whale.id).all()
 

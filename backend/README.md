@@ -1,5 +1,8 @@
 # Whale Tracker Backend
 
+
+
+
 ## Dev loop
 - Python 3.11+ with `pip install -r requirements.txt`
 - Copy `.env.example` to `.env`, adjust RPC/API keys; defaults point to local SQLite at `./data/whales.db`.
@@ -22,11 +25,24 @@
 - Backfill a wallet: `POST /api/v1/whales/{id}/backfill` (or reset for Hyperliquid via `/reset_hyperliquid`). Poll `/backfill_status`.
 - Rebuild chart history if empty: call `GET /api/v1/wallets/{chain}/{address}/roi-history` and `/portfolio-history`; they trigger rebuilds when missing.
 
+## Using a cPanel MariaDB database
+- Ensure the dependency is installed: `pip install -r requirements.txt` (pulls `pymysql`).
+- If the app runs outside the cPanel host, add your server IP in cPanel → Remote MySQL so it can connect.
+- Set `DATABASE_URL` in `.env` to your cPanel database, e.g. `mysql+pymysql://cpanel_user:your_password@yourhost:3306/your_db_name?charset=utf8mb4`. Leave other `DB_*` vars alone.
+- Apply the schema to that database: `alembic upgrade head`.
+- Start the API normally; all reads/writes will now target the MariaDB instance shown in phpMyAdmin.
+
 ## Frontend integration
 -Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 - Frontend `.env` already points to `http://localhost:8000`.
 - API CORS is open; run backend first, then frontend at `127.0.0.1:8080`.
 - Websocket live feed: connect to `ws://localhost:8000/api/v1/events/ws/live`.
+
+## AWS CLI (S3 access for Hyperliquid history)
+- Install AWS CLI: `winget install -e --id Amazon.AWSCLI` (Windows) or `brew install awscli` (macOS).
+- Configure the profile used in `.env` (`AWS_PROFILE=hl-requester`): `aws configure --profile hl-requester` and provide Access Key ID / Secret, region (e.g., `us-east-1`), output `json`.
+- Verify access to the requester-pays bucket: `aws s3 ls s3://hl-mainnet-node-data/node_fills/hourly/ --request-payer requester --profile hl-requester`.
+- When running the backend, ensure the profile is active (`AWS_PROFILE=hl-requester`) or export `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` directly so boto3 can read them.
 
 ## Tests
 Run `pytest` from `backend/` (smoke tests cover health and core API responses). Enable/disable ingestors via env as above.
@@ -56,3 +72,9 @@ with SessionLocal() as session:
     result = import_hl_history_from_s3(session, whale, start, end)
     print(result)
 '@ | python -
+
+
+
+
+cd .\WhalesTracker\.ssh\
+ssh -i ".\id_rsa_whales" -L 3307:localhost:3306 ksa95aofrzyd@p3plzcpnl504633.prod.phx3.secureserver.net

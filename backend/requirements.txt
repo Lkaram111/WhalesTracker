@@ -3,6 +3,7 @@ uvicorn[standard]
 sqlalchemy
 alembic
 psycopg2-binary
+pymysql
 pydantic
 pydantic-settings
 httpx
@@ -17,3 +18,4 @@ hexbytes
 msgpack
 boto3
 lz4
+"botocore[crt]"

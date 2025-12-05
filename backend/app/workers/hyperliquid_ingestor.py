@@ -27,6 +27,7 @@ from app.services.broadcast import broadcast_manager
 from app.services.hyperliquid_client import hyperliquid_client
 from app.services.metrics_service import touch_last_active
 from app.services.metrics_service import recompute_wallet_metrics
+import logging
 
 logger = logging.getLogger(__name__)
 
@@ -125,15 +126,26 @@ class HyperliquidIngestor:
         max_pages: int = 20,
         progress_cb: Callable[[float, str | None], None] | None = None,
     ) -> bool:
+        # Clear any stale transaction state to avoid cascading lock timeouts.
+        session.rollback()
+        try:
+            session.execute("SET SESSION innodb_lock_wait_timeout=5")
+        except Exception:
+            # Not all DBs support this; continue best-effort.
+            session.rollback()
         now = datetime.now(timezone.utc)
         progress = progress_cb or (lambda pct, msg=None: None)
         progress(5.0, "hyperliquid: fetching fills")
         wrote = False
         checkpoint = self._get_or_create_checkpoint(session, whale)
+        # If trades were wiped but a checkpoint remains, reset to force full backfill.
+        existing_trades = session.scalar(select(Trade.id).where(Trade.whale_id == whale.id))
+        if existing_trades is None:
+            checkpoint.last_fill_time = None
         if checkpoint.last_fill_time is None:
             self._seed_checkpoint_from_trades(session, whale, checkpoint)
         if checkpoint.last_fill_time is None:
-            start_time = int(now.timestamp() * 1000) - int(timedelta(days=60).total_seconds() * 1000)
+            start_time = 0  # full history
         else:
             start_time = checkpoint.last_fill_time
         logger.debug(
@@ -147,7 +159,7 @@ class HyperliquidIngestor:
             progress(100.0, "hyperliquid: skipped due to backoff")
             return False
         try:
-            page_limit = 1 if start_time is not None else max_pages
+            page_limit = max(1, max_pages)
             cursor = (start_time + 1) if start_time is not None else None
             fills = hyperliquid_client.get_user_fills_paginated(
                 whale.address, start_time=cursor, max_pages=page_limit
@@ -160,6 +172,13 @@ class HyperliquidIngestor:
             fills = []
             self._record_backoff(whale.address, exc)
 
+        # Preload existing tx hashes once to avoid per-fill queries.
+        existing_hashes = set(
+            h[0]
+            for h in session.query(Trade.tx_hash)
+            .filter(Trade.whale_id == whale.id, Trade.tx_hash.isnot(None))
+            .all()
+        )
         new_fills = [
             f for f in fills if checkpoint.last_fill_time is None or (f.get("time") or 0) > checkpoint.last_fill_time
         ]
@@ -172,13 +191,7 @@ class HyperliquidIngestor:
             for fill in sorted(new_fills, key=lambda f: f.get("time") or 0):
                 tx_hash = fill.get("hash") or str(fill.get("tid") or fill.get("oid") or "")
                 if tx_hash:
-                    if tx_hash in seen_tx:
-                        continue
-                    exists = session.scalar(
-                        select(Trade.id).where(Trade.tx_hash == tx_hash, Trade.whale_id == whale.id)
-                    )
-                    if exists:
-                        seen_tx.add(tx_hash)
+                    if tx_hash in seen_tx or tx_hash in existing_hashes:
                         continue
                     seen_tx.add(tx_hash)
                 ts_ms = fill.get("time") or 0
@@ -390,15 +403,41 @@ class HyperliquidIngestor:
         cp = session.query(IngestionCheckpoint).filter(IngestionCheckpoint.whale_id == whale.id).one_or_none()
         if cp:
             return cp
-        cp = IngestionCheckpoint(
-            whale_id=whale.id,
-            chain_slug="hyperliquid",
-            last_fill_time=None,
-            last_position_time=None,
-        )
-        session.add(cp)
-        session.flush()
-        return cp
+        # Avoid MySQL/MariaDB lock waits when the checkpoints table is busy: fall back to in-memory checkpoint.
+        if session.bind.dialect.name == "mysql":
+            logger.warning("Checkpoint missing for %s; skipping DB insert to avoid lock waits (mysql)", whale.address)
+            return IngestionCheckpoint(
+                whale_id=whale.id,
+                chain_slug="hyperliquid",
+                last_fill_time=None,
+                last_position_time=None,
+            )
+        # Insert with retries to dodge occasional MySQL lock timeouts.
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                cp = IngestionCheckpoint(
+                    whale_id=whale.id,
+                    chain_slug="hyperliquid",
+                    last_fill_time=None,
+                    last_position_time=None,
+                )
+                session.add(cp)
+                session.flush()
+                return cp
+            except OperationalError:
+                session.rollback()
+                if attempts >= 3:
+                    logger.warning("Failed to create ingestion checkpoint for %s after retries; proceeding without persistence", whale.address)
+                    # Fallback: return an in-memory checkpoint so ingestion can proceed; we'll re-attempt next tick.
+                    return IngestionCheckpoint(
+                        whale_id=whale.id,
+                        chain_slug="hyperliquid",
+                        last_fill_time=None,
+                        last_position_time=None,
+                    )
+                time.sleep(min(2 * attempts, self._max_backoff_seconds))
 
     def _seed_checkpoint_from_trades(self, session, whale: Whale, checkpoint: IngestionCheckpoint) -> None:
         try:

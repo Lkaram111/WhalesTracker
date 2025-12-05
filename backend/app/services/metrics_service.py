@@ -6,7 +6,7 @@ import time
 from typing import Any, Iterable
 
 from sqlalchemy import func, select
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, PendingRollbackError
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -334,6 +334,9 @@ def _commit_with_retry(session: Session, retries: int = 3, delay: float = 0.5) -
         try:
             session.commit()
             return
+        except PendingRollbackError:
+            session.rollback()
+            raise
         except OperationalError:
             session.rollback()
             if attempt == retries - 1:
