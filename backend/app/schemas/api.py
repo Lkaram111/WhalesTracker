@@ -145,6 +145,7 @@ class ListResponse(BaseModel):
 class TradesResponse(BaseModel):
     items: list[Trade]
     next_cursor: str | None = None
+    total: int
 
 
 class EventsResponse(BaseModel):

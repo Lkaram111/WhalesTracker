@@ -106,7 +106,7 @@ export const api = {
     if (direction) params.set('direction', direction);
     params.set('limit', `${limit}`);
     if (cursor) params.set('cursor', cursor);
-    return apiGet<{ items: Trade[]; next_cursor: string | null }>(
+    return apiGet<{ items: Trade[]; next_cursor: string | null; total: number }>(
       `/api/v1/wallets/${chain}/${address}/trades?${params.toString()}`
     );
   },
@@ -117,6 +117,11 @@ export const api = {
   getWalletPortfolioHistory: (chain: string, address: string, days = 30) =>
     apiGet<{ points: PortfolioPoint[] }>(
       `/api/v1/wallets/${chain}/${address}/portfolio-history?days=${days}`
+    ),
+  importHyperliquidPaidHistory: (chain: string, address: string, start_date: string, end_date: string) =>
+    apiPost<{ imported: number; skipped: number }>(
+      `/api/v1/wallets/${chain}/${address}/hyperliquid/import_paid`,
+      { start_date, end_date }
     ),
   runCopierBacktest: (body: {
     chain: string;

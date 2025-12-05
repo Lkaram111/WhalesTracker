@@ -69,6 +69,12 @@ export interface Trade {
   close_price_usd?: number | null;
 }
 
+export interface TradesResponse {
+  items: Trade[];
+  next_cursor?: string | null;
+  total: number;
+}
+
 export interface LiveEvent {
   id: string;
   timestamp: string;

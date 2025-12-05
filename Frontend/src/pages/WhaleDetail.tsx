@@ -26,6 +26,7 @@ export default function WhaleDetail() {
   const [walletDetails, setWalletDetails] = useState<WalletDetails | null>(null);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [tradesNextCursor, setTradesNextCursor] = useState<string | null>(null);
+  const [tradesTotal, setTradesTotal] = useState<number | null>(null);
   const [tradesLoading, setTradesLoading] = useState(false);
   const [positions, setPositions] = useState<OpenPosition[]>([]);
   const [roiHistory, setRoiHistory] = useState<{ timestamp: string; roi_percent: number }[]>([]);
@@ -41,6 +42,10 @@ export default function WhaleDetail() {
   const [groupSimilarTrades, setGroupSimilarTrades] = useState(false);
   const [backfillPending, setBackfillPending] = useState(false);
   const [backfillError, setBackfillError] = useState<string | null>(null);
+  const [paidImportStart, setPaidImportStart] = useState<string>('');
+  const [paidImportEnd, setPaidImportEnd] = useState<string>('');
+  const [paidImportStatus, setPaidImportStatus] = useState<string | null>(null);
+  const [paidImportLoading, setPaidImportLoading] = useState(false);
 
   const fillDailySeries = <T extends { timestamp: string }>(
     points: T[],
@@ -128,11 +133,13 @@ export default function WhaleDetail() {
       .then((res) => {
         setTrades(res.items);
         setTradesNextCursor(res.next_cursor);
+        setTradesTotal(res.total ?? null);
         setLastRefreshed(new Date());
       })
       .catch(() => {
         setTrades([]);
         setTradesNextCursor(null);
+        setTradesTotal(null);
         setTradesError('Failed to load trades. Please refresh.');
       })
       .finally(() => setTradesLoading(false));
@@ -244,6 +251,7 @@ export default function WhaleDetail() {
       .then((res) => {
         setTrades((prev) => [...prev, ...res.items]);
         setTradesNextCursor(res.next_cursor);
+        setTradesTotal(res.total ?? tradesTotal);
       })
       .finally(() => setTradesLoading(false));
   };
@@ -353,6 +361,58 @@ export default function WhaleDetail() {
               {whaleId ? 'Progress will appear once a reset starts.' : 'Resolving wallet id...'}
             </p>
           )}
+          <div className="border-t border-border pt-3 mt-2 space-y-2">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h4 className="text-xs font-semibold text-foreground">Fetch historical paid data (Hyperliquid S3)</h4>
+                <p className="text-xs text-muted-foreground">
+                  Downloads from requester-pays S3; set start/end dates and ingest past fills.
+                </p>
+              </div>
+              <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+                <input
+                  type="date"
+                  value={paidImportStart}
+                  onChange={(e) => setPaidImportStart(e.target.value)}
+                  className="h-9 rounded-md border border-border bg-background px-2 text-xs"
+                />
+                <input
+                  type="date"
+                  value={paidImportEnd}
+                  onChange={(e) => setPaidImportEnd(e.target.value)}
+                  className="h-9 rounded-md border border-border bg-background px-2 text-xs"
+                />
+                <Button
+                  size="sm"
+                  onClick={async () => {
+                    if (!paidImportStart || !paidImportEnd) return;
+                    setPaidImportLoading(true);
+                    setPaidImportStatus(null);
+                    try {
+                      const res = await api.importHyperliquidPaidHistory(
+                        chain,
+                        address,
+                        new Date(paidImportStart).toISOString(),
+                        new Date(paidImportEnd).toISOString()
+                      );
+                      setPaidImportStatus(`Imported ${res.imported} fills, skipped ${res.skipped}.`);
+                      setRefreshKey((k) => k + 1);
+                    } catch (err) {
+                      setPaidImportStatus(err instanceof Error ? err.message : 'Import failed');
+                    } finally {
+                      setPaidImportLoading(false);
+                    }
+                  }}
+                  disabled={!paidImportStart || !paidImportEnd || paidImportLoading}
+                >
+                  {paidImportLoading ? 'Fetching…' : 'Fetch historical paid data'}
+                </Button>
+              </div>
+            </div>
+            {paidImportStatus && (
+              <p className="text-xs text-muted-foreground">{paidImportStatus}</p>
+            )}
+          </div>
         </div>
       )}
       {chain !== 'hyperliquid' && (
@@ -536,7 +596,14 @@ export default function WhaleDetail() {
       {/* Trades Table */}
       <div className="space-y-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-foreground">Trades</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-lg font-semibold text-foreground">Trades</h2>
+              {tradesTotal !== null && (
+                <span className="text-xs text-muted-foreground">
+                  {tradesTotal.toLocaleString()} historical trades
+                </span>
+              )}
+            </div>
           <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2">
             <div className="flex items-center gap-2">
               <span className="text-xs text-muted-foreground">Direction</span>

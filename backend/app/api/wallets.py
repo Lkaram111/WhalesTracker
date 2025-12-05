@@ -35,6 +35,8 @@ from app.services.metrics_service import (
     rebuild_portfolio_history_from_trades,
 )
 from app.core.time_utils import now
+from app.services.hyperliquid_paid_import import import_hl_history_from_s3
+from pydantic import BaseModel
 
 router = APIRouter()
 _positions_cache: dict[str, tuple[float, list[OpenPosition]]] = {}
@@ -44,6 +46,12 @@ EXPLORER_BASES = {
     "ethereum": "https://etherscan.io/address/",
     "bitcoin": "https://mempool.space/address/",
     "hyperliquid": "https://explorer.hyperliquid.xyz/account/",
+}
+
+TX_EXPLORER_BASES = {
+    "ethereum": "https://etherscan.io/tx/",
+    "bitcoin": "https://mempool.space/tx/",
+    "hyperliquid": "https://app.hyperliquid.xyz/explorer/tx/",
 }
 
 
@@ -62,6 +70,18 @@ def _commit_with_retry(session, retries: int = 3, delay: float = 0.5) -> None:
 def build_explorer_url(chain: str, address: str) -> str:
     base = EXPLORER_BASES.get(chain.lower())
     return f"{base}{address}" if base else address
+
+
+def build_tx_explorer_url(chain: str, tx_hash: str | None) -> str | None:
+    if not tx_hash:
+        return None
+    base = TX_EXPLORER_BASES.get(chain.lower())
+    if not base:
+        return None
+    canonical = tx_hash.split(":", 1)[0]
+    if not canonical:
+        return None
+    return f"{base}{canonical}"
 
 
 def _ensure_metrics_up_to_date(session, whale: Whale) -> CurrentWalletMetrics | None:
@@ -99,7 +119,10 @@ def _resolve_whale(session, chain_slug: str, address: str) -> tuple[Whale, Chain
 def _serialize_trades(trades: Iterable[Trade], chain_slug: str):
     items = []
     for t in trades:
-        tx_hash = t.tx_hash.hex() if isinstance(t.tx_hash, (bytes, bytearray)) else t.tx_hash
+        raw_tx_hash = t.tx_hash.hex() if isinstance(t.tx_hash, (bytes, bytearray)) else t.tx_hash
+        tx_hash = str(raw_tx_hash) if raw_tx_hash is not None else None
+        canonical_tx_hash = tx_hash.split(":", 1)[0] if tx_hash else None
+        tx_link = t.external_url or build_tx_explorer_url(chain_slug, canonical_tx_hash)
         price = None
         try:
             if t.value_usd is not None and t.amount_base not in (None, 0):
@@ -158,8 +181,8 @@ def _serialize_trades(trades: Iterable[Trade], chain_slug: str):
                 "value_usd": float(t.value_usd or 0),
                 "pnl_usd": float(t.pnl_usd) if t.pnl_usd is not None else None,
                 "pnl_percent": float(t.pnl_percent) if t.pnl_percent is not None else None,
-                "tx_hash": tx_hash,
-                "external_url": t.external_url,
+                "tx_hash": canonical_tx_hash,
+                "external_url": tx_link,
                 "price_usd": price,
                 "open_price_usd": open_price,
                 "close_price_usd": close_price,
@@ -168,7 +191,7 @@ def _serialize_trades(trades: Iterable[Trade], chain_slug: str):
     return items
 
 
-def _sync_hyperliquid_activity(session, whale: Whale, chain_obj: Chain, max_pages: int = 2) -> None:
+def _sync_hyperliquid_activity(session, whale: Whale, chain_obj: Chain, max_pages: int = 10) -> None:
     """Fetch and store any missing recent fills so the whale page reflects latest activity."""
     if chain_obj.slug != "hyperliquid":
         return
@@ -178,9 +201,16 @@ def _sync_hyperliquid_activity(session, whale: Whale, chain_obj: Chain, max_page
             Trade.source == TradeSource.HYPERLIQUID,
         )
     )
-    start_time = int(last_ts.timestamp() * 1000) if last_ts else None
+    # If we've never synced, start from a recent window to avoid paging through years of fills.
+    lookback_start = now() - timedelta(days=60)
+    start_time = int(last_ts.timestamp() * 1000) if last_ts else int(lookback_start.timestamp() * 1000)
     try:
-        fills = hyperliquid_client.get_user_fills_paginated(whale.address, start_time=start_time, max_pages=max_pages)
+        fills = hyperliquid_client.get_user_fills_paginated(
+            whale.address,
+            start_time=start_time,
+            end_time=int(now().timestamp() * 1000),
+            max_pages=max_pages,
+        )
     except Exception:
         return
     new_fills = [f for f in fills if start_time is None or (f.get("time") or 0) > start_time]
@@ -526,6 +556,7 @@ async def get_wallet_trades(
             except ValueError:
                 raise HTTPException(status_code=400, detail="Invalid cursor")
 
+        total = session.query(func.count()).select_from(query.subquery()).scalar() or 0
         rows = query.limit(limit + 1).all()
         has_more = len(rows) > limit
         trades = rows[:limit]
@@ -533,4 +564,31 @@ async def get_wallet_trades(
         next_cursor = (
             f"{trades[-1].timestamp.isoformat()}|{trades[-1].id}" if has_more and trades else None
         )
-        return TradesResponse(items=items, next_cursor=next_cursor)
+        return TradesResponse(items=items, next_cursor=next_cursor, total=int(total))
+
+
+class PaidHistoryRequest(BaseModel):
+    start_date: datetime
+    end_date: datetime
+
+
+@router.post(
+    "/{chain}/{address}/hyperliquid/import_paid",
+    response_model=dict,
+)
+async def import_hyperliquid_paid_history(
+    chain: str,
+    address: str,
+    payload: PaidHistoryRequest,
+):
+    if chain.lower() != "hyperliquid":
+        raise HTTPException(status_code=400, detail="Paid history import supported only for hyperliquid")
+    with SessionLocal() as session:
+        whale, chain_obj = _resolve_whale(session, chain, address)
+        # Normalize to date boundaries UTC
+        start = payload.start_date.date()
+        end = payload.end_date.date()
+        if start > end:
+            raise HTTPException(status_code=400, detail="start_date must be before end_date")
+        result = import_hl_history_from_s3(session, whale, start=start, end=end)
+        return result

@@ -15,3 +15,5 @@ ccxt
 eth-account
 hexbytes
 msgpack
+boto3
+lz4

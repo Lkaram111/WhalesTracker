@@ -30,6 +30,32 @@ const directionConfig: Record<string, { label: string; color: string; icon: type
   withdraw: { label: 'Withdraw', color: 'text-warning', icon: ArrowUpRight },
 };
 
+const TX_EXPLORER_BASES: Record<Trade['chain'], string> = {
+  ethereum: 'https://etherscan.io/tx/',
+  bitcoin: 'https://mempool.space/tx/',
+  hyperliquid: 'https://app.hyperliquid.xyz/explorer/tx/',
+};
+
+const normalizeTxHash = (hash?: string | null): string | null => {
+  if (!hash) return null;
+  const canonical = hash.split(':')[0];
+  return canonical || null;
+};
+
+const getTxExplorerUrl = (chain: Trade['chain'], hash?: string | null): string | null => {
+  const txHash = normalizeTxHash(hash);
+  if (!txHash) return null;
+  const base = TX_EXPLORER_BASES[chain];
+  return base ? `${base}${txHash}` : null;
+};
+
+const formatTxHash = (hash?: string | null): string => {
+  const txHash = normalizeTxHash(hash);
+  if (!txHash) return '--';
+  if (txHash.length <= 12) return txHash;
+  return `${txHash.slice(0, 6)}...${txHash.slice(-4)}`;
+};
+
 export function TradesTable({
   trades,
   title = 'Recent Trades',
@@ -85,6 +111,7 @@ export function TradesTable({
             {trades.map((trade) => {
               const config = directionConfig[trade.direction] || directionConfig.buy;
               const Icon = config.icon;
+              const txUrl = trade.external_url || getTxExplorerUrl(trade.chain, trade.tx_hash);
               
               return (
                 <tr 
@@ -160,11 +187,11 @@ export function TradesTable({
                         )}
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-right">
-                    {trade.pnl_usd !== null ? (
-                      <div
-                        className={cn(
-                          "font-medium",
+              <td className="px-4 py-3 text-right">
+                {trade.pnl_usd !== null ? (
+                  <div
+                    className={cn(
+                      "font-medium",
                           trade.pnl_usd >= 0 ? "text-success" : "text-destructive"
                         )}
                       >
@@ -173,22 +200,30 @@ export function TradesTable({
                           <span className="text-xs ml-1">
                             ({formatPercent(trade.pnl_percent)})
                           </span>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-muted-foreground/50">--</span>
+                )}
+              </td>
+                  <td className="px-4 py-3 text-center">
+                    {normalizeTxHash(trade.tx_hash) ? (
+                      <div className="inline-flex items-center justify-center gap-2">
+                        <span className="font-mono text-xs text-foreground">
+                          {formatTxHash(trade.tx_hash)}
+                        </span>
+                        {txUrl && (
+                          <a
+                            href={txUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex h-8 w-8 items-center justify-center rounded hover:bg-muted transition-colors"
+                            aria-label="Open transaction in explorer"
+                          >
+                            <ExternalLink className="h-4 w-4 text-muted-foreground" />
+                          </a>
                         )}
                       </div>
-                    ) : (
-                      <span className="text-muted-foreground/50">--</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-center">
-                    {trade.external_url ? (
-                      <a
-                        href={trade.external_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex h-8 w-8 items-center justify-center rounded hover:bg-muted transition-colors"
-                      >
-                        <ExternalLink className="h-4 w-4 text-muted-foreground" />
-                      </a>
                     ) : (
                       <span className="text-muted-foreground/50">--</span>
                     )}

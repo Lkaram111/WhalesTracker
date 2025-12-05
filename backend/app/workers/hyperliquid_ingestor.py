@@ -132,7 +132,10 @@ class HyperliquidIngestor:
         checkpoint = self._get_or_create_checkpoint(session, whale)
         if checkpoint.last_fill_time is None:
             self._seed_checkpoint_from_trades(session, whale, checkpoint)
-        start_time = checkpoint.last_fill_time
+        if checkpoint.last_fill_time is None:
+            start_time = int(now.timestamp() * 1000) - int(timedelta(days=60).total_seconds() * 1000)
+        else:
+            start_time = checkpoint.last_fill_time
         logger.debug(
             "HL ingest fills whale=%s start_time=%s",
             whale.address,
