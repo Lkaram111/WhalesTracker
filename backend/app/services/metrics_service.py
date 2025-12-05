@@ -511,5 +511,5 @@ def _rebuild_hyperliquid_history(session: Session, whale: Whale, trades: list[Tr
         session.query(WalletMetricsDaily).filter(
             WalletMetricsDaily.whale_id == whale.id,
             WalletMetricsDaily.date.in_(stale),
-        ).delete(synchronize_session=False)
+        ).delete(synchronize_session="fetch")
     session.flush()
