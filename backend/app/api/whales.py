@@ -3,6 +3,7 @@ import asyncio
 
 from fastapi import APIRouter, Query, HTTPException
 from sqlalchemy import and_, func, or_, select, String, cast
+from sqlalchemy.exc import OperationalError
 
 from app.db.session import SessionLocal
 from app.models import (
@@ -28,11 +29,19 @@ from app.schemas.api import (
 from app.services.backfill_progress import backfill_progress
 from app.services.backfill_service import backfill_wallet_history
 from app.services.hyperliquid_client import hyperliquid_client
-from app.services.metrics_service import recompute_wallet_metrics
+from app.services.metrics_service import recompute_wallet_metrics, _commit_with_retry
 from app.services.holdings_service import refresh_holdings_for_whales
 from app.core.time_utils import now
 
 router = APIRouter()
+
+
+def _commit_or_503(session, action: str) -> None:
+    try:
+        _commit_with_retry(session)
+    except OperationalError as exc:
+        session.rollback()
+        raise HTTPException(status_code=503, detail=f"{action} unavailable, database is busy") from exc
 
 
 @router.get("", response_model=ListResponse)
@@ -196,7 +205,7 @@ async def create_whale(payload: WhaleCreateRequest) -> WhaleSummary:
             labels=labels,
         )
         session.add(whale)
-        session.commit()
+        _commit_or_503(session, "create whale")
 
         # Kick off backfill in background thread to avoid blocking the API
         asyncio.create_task(_run_backfill_async(whale.id))
@@ -229,7 +238,7 @@ async def update_whale(whale_id: str, payload: WhaleUpdateRequest) -> WhaleSumma
             whale.labels = payload.labels
         if payload.type is not None:
             whale.type = payload.type
-        session.commit()
+        _commit_or_503(session, "update whale")
         metrics = session.get(CurrentWalletMetrics, whale.id)
         chain = session.get(Chain, whale.chain_id)
         chain_slug = chain.slug if chain else "ethereum"
@@ -257,7 +266,7 @@ async def delete_whale(whale_id: str) -> DeleteResponse:
         if not whale:
             raise HTTPException(status_code=404, detail="Whale not found")
         session.delete(whale)
-        session.commit()
+        _commit_or_503(session, "delete whale")
     return DeleteResponse(success=True)
 
 
@@ -293,10 +302,12 @@ def _run_backfill_sync(whale_id: str) -> None:
 
         try:
             backfilled = backfill_wallet_history(session, whale, progress_cb=progress_cb)
+            # Release locks from ingestion before downstream recompute work.
+            _commit_with_retry(session)
             if chain and chain.slug != "hyperliquid":
                 refresh_holdings_for_whales(session, [whale])
                 recompute_wallet_metrics(session, whale)
-            session.commit()
+            _commit_with_retry(session)
             backfill_progress.finish(
                 whale.id,
                 success=bool(backfilled),

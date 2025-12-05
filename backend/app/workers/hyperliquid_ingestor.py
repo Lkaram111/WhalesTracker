@@ -266,6 +266,8 @@ class HyperliquidIngestor:
                 len(new_fills),
                 checkpoint.last_fill_time,
             )
+            # Commit early to release write locks during long backfills.
+            self._commit_with_retry(session)
         else:
             logger.debug("HL ingest fills whale=%s no new fills", whale.address)
             # Record that we checked up to the current cursor so we don't scan behind it next tick.
@@ -288,6 +290,8 @@ class HyperliquidIngestor:
         else:
             logger.debug("HL ingest positions whale=%s no positions written", whale.address)
         recompute_wallet_metrics(session, whale)
+        # Commit after metrics/holdings updates to keep transactions short.
+        self._commit_with_retry(session)
         progress(100.0, "hyperliquid: backfill done")
         return wrote
 

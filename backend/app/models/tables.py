@@ -56,6 +56,14 @@ class EventType(str, Enum):
     PERP_TRADE = "perp_trade"
 
 
+# Use explicit Enum instances so Postgres uses the lowercase values (not names) for binds.
+_enum_kwargs = {"native_enum": True, "values_callable": lambda obj: [e.value for e in obj]}
+whale_type_enum = SqlEnum(WhaleType, name="whaletype", **_enum_kwargs)
+trade_source_enum = SqlEnum(TradeSource, name="tradesource", **_enum_kwargs)
+trade_direction_enum = SqlEnum(TradeDirection, name="tradedirection", **_enum_kwargs)
+event_type_enum = SqlEnum(EventType, name="eventtype", **_enum_kwargs)
+
+
 @declarative_mixin
 class TimestampMixin:
     @declared_attr
@@ -90,16 +98,7 @@ class Whale(Base, TimestampMixin):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     address = Column(String(256), nullable=False)
     chain_id = Column(Integer, ForeignKey("chains.id", ondelete="CASCADE"), nullable=False)
-    type = Column(
-        SqlEnum(
-            WhaleType,
-            values_callable=lambda enum_cls: [e.value for e in enum_cls],
-            native_enum=False,
-            name="whaletype",
-        ),
-        nullable=False,
-        default=WhaleType.HOLDER,
-    )
+    type = Column(whale_type_enum, nullable=False, default=WhaleType.HOLDER)
     labels = Column(JSON, nullable=False, default=list)
     external_explorer_url = Column(Text, nullable=True)
     first_seen_at = Column(DateTime(timezone=True), nullable=True)
@@ -162,9 +161,9 @@ class Trade(Base):
     whale_id = Column(String(36), ForeignKey("whales.id", ondelete="CASCADE"), nullable=False)
     timestamp = Column(DateTime(timezone=True), nullable=False)
     chain_id = Column(Integer, ForeignKey("chains.id", ondelete="SET NULL"), nullable=True)
-    source = Column(SqlEnum(TradeSource), nullable=False)
+    source = Column(trade_source_enum, nullable=False)
     platform = Column(String(128), nullable=True)
-    direction = Column(SqlEnum(TradeDirection), nullable=False)
+    direction = Column(trade_direction_enum, nullable=False)
     base_asset = Column(String(128), nullable=True)
     quote_asset = Column(String(128), nullable=True)
     amount_base = Column(Numeric(38, 18), nullable=True)
@@ -183,7 +182,7 @@ class Event(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     timestamp = Column(DateTime(timezone=True), nullable=False)
     chain_id = Column(Integer, ForeignKey("chains.id", ondelete="SET NULL"), nullable=True)
-    type = Column(SqlEnum(EventType), nullable=False)
+    type = Column(event_type_enum, nullable=False)
     whale_id = Column(String(36), ForeignKey("whales.id", ondelete="CASCADE"), nullable=False)
     summary = Column(Text, nullable=True)
     value_usd = Column(Numeric(30, 10), nullable=True)

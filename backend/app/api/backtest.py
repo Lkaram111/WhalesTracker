@@ -25,6 +25,7 @@ from app.schemas.api import (
 )
 from app.services.price_service import fetch_and_store_binance_prices
 from app.services.copier_manager import copier_manager
+from app.services.metrics_service import _commit_with_retry
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -210,6 +211,12 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
                     limit=1000,
                 )
                 session.flush()
+                _commit_with_retry(session)
+            except OperationalError as exc:
+                session.rollback()
+                logger.warning(
+                    "price preload commit failed; continuing without new prices: %s", exc
+                )
             except Exception as exc:
                 # SQLite can raise "database is locked" under concurrent writers; reset the session and continue.
                 session.rollback()
@@ -497,7 +504,7 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
         )
         try:
             session.add(run_record)
-            session.commit()
+            _commit_with_retry(session)
         except OperationalError as exc:
             session.rollback()
             exc_str = str(exc).lower()
@@ -506,7 +513,7 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
                 if created:
                     try:
                         session.add(run_record)
-                        session.commit()
+                        _commit_with_retry(session)
                         logger.info("Created missing backtest_runs table and retried commit")
                     except OperationalError as exc_retry:
                         session.rollback()

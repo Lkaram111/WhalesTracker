@@ -8,6 +8,7 @@ from typing import Callable
 import logging
 from httpx import HTTPStatusError
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from app.db.session import SessionLocal
 from app.models import Chain, Event, EventType, Trade, TradeDirection, TradeSource, Whale
@@ -59,8 +60,10 @@ class BitcoinIngestor:
 
             for whale in whales:
                 self._process_whale(session, btc_chain.id, whale)
+                # Commit per whale to keep transactions short.
+                self._commit_with_retry(session)
 
-            session.commit()
+            self._commit_with_retry(session)
 
     def _fetch_btc_price(self) -> float | None:
         try:
@@ -177,6 +180,8 @@ class BitcoinIngestor:
             inserted = self._ingest_transactions(session, chain_id, whale, txs)
             total_inserted += inserted
             offset += len(txs)
+            # Commit each page to release locks when backfilling many transactions.
+            self._commit_with_retry(session)
             if progress:
                 pct = min(100.0, ((idx + 1) / max_pages) * 100.0)
                 progress(pct, f"bitcoin backfill page {idx + 1}/{max_pages}")
@@ -230,6 +235,17 @@ class BitcoinIngestor:
                 self._loop.call_soon_threadsafe(asyncio.create_task, broadcast_manager.broadcast(msg))
         except Exception:
             logger.debug("Bitcoin broadcast scheduling failed", exc_info=True)
+
+    def _commit_with_retry(self, session, retries: int = 3, delay: float = 0.5) -> None:
+        for attempt in range(retries):
+            try:
+                session.commit()
+                return
+            except OperationalError:
+                session.rollback()
+                if attempt == retries - 1:
+                    raise
+                time.sleep(delay)
 
 
 EXCHANGE_ADDRESSES = {
