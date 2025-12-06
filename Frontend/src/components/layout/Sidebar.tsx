@@ -63,7 +63,7 @@ export function Sidebar() {
             <img
               src="/Logo.png"
               alt="WhaleTracker logo"
-              className="h-16 w-full rounded-md border border-sidebar-border/60 bg-sidebar-accent object-contain px-3 py-2"
+              className="w-full h-auto max-h-40 rounded-md border border-sidebar-border/60 bg-sidebar-accent object-contain"
             />
           </div>
         )}
