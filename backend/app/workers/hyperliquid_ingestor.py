@@ -33,9 +33,10 @@ logger = logging.getLogger(__name__)
 
 
 class HyperliquidIngestor:
-    def __init__(self, poll_interval: float = 300.0, max_pages_per_tick: int = 3) -> None:
+    def __init__(self, poll_interval: float = 300.0, max_pages_per_tick: int = 3, backfill_max_pages: int = 10) -> None:
         self.poll_interval = poll_interval
         self.max_pages_per_tick = max_pages_per_tick
+        self.backfill_max_pages = backfill_max_pages
         self._running = False
         self._failure_backoff: dict[str, tuple[int, datetime]] = {}
         self._max_backoff_seconds = 60
@@ -83,6 +84,20 @@ class HyperliquidIngestor:
 
     def stop(self) -> None:
         self._running = False
+
+    def run_once_for_whale(self, whale_id: str, max_pages: int | None = None) -> bool:
+        with SessionLocal() as session:
+            whale = session.get(Whale, whale_id)
+            if not whale:
+                return False
+            chain = session.get(Chain, whale.chain_id)
+            if not chain or chain.slug != "hyperliquid":
+                return False
+            wrote = self._process_account(
+                session, chain.id, whale, max_pages=max_pages or self.backfill_max_pages
+            )
+            self._commit_with_retry(session)
+            return wrote
 
     def process_accounts(self) -> None:
         logger.debug("Hyperliquid ingestor polling accounts")
@@ -159,7 +174,8 @@ class HyperliquidIngestor:
             progress(100.0, "hyperliquid: skipped due to backoff")
             return False
         try:
-            page_limit = max(1, max_pages)
+            is_new = checkpoint.last_fill_time in (None, 0)
+            page_limit = max(self.backfill_max_pages if is_new else self.max_pages_per_tick, max(1, max_pages))
             cursor = (start_time + 1) if start_time is not None else None
             fills = hyperliquid_client.get_user_fills_paginated(
                 whale.address, start_time=cursor, max_pages=page_limit

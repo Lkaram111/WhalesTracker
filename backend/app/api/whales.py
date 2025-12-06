@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import asyncio
+import logging
 
 from fastapi import APIRouter, Query, HTTPException
 from sqlalchemy import and_, func, or_, select, String, cast, case
@@ -32,8 +33,10 @@ from app.services.hyperliquid_client import hyperliquid_client
 from app.services.metrics_service import recompute_wallet_metrics, _commit_with_retry
 from app.services.holdings_service import refresh_holdings_for_whales
 from app.core.time_utils import now
+from app.workers.hyperliquid_ingestor import HyperliquidIngestor
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _commit_or_503(session, action: str) -> None:
@@ -212,6 +215,8 @@ async def create_whale(payload: WhaleCreateRequest) -> WhaleSummary:
 
         # Kick off backfill in background thread to avoid blocking the API
         asyncio.create_task(_run_backfill_async(whale.id))
+        if chain.slug == "hyperliquid":
+            asyncio.create_task(_ingest_hyperliquid_once_async(whale.id))
 
         metrics = session.get(CurrentWalletMetrics, whale.id)
         return WhaleSummary(
@@ -319,6 +324,18 @@ def _run_backfill_sync(whale_id: str) -> None:
         except Exception as exc:
             session.rollback()
             backfill_progress.error(whale.id, f"error: {exc}")
+
+
+async def _ingest_hyperliquid_once_async(whale_id: str) -> None:
+    await asyncio.to_thread(_ingest_hyperliquid_once_sync, whale_id)
+
+
+def _ingest_hyperliquid_once_sync(whale_id: str) -> None:
+    try:
+        HyperliquidIngestor().run_once_for_whale(whale_id)
+        logger.info("Scheduled immediate Hyperliquid ingestion for whale id=%s", whale_id)
+    except Exception as exc:
+        logger.warning("Immediate Hyperliquid ingestion failed for whale id=%s: %s", whale_id, exc)
 
 
 @router.get("/resolve", response_model=ResolveWhaleResponse)
