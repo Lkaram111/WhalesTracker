@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from bisect import bisect_right
 from decimal import Decimal
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, Any
 
 import logging
 import time
@@ -23,6 +24,8 @@ from app.schemas.api import (
     LiveTradesResponse,
     StartCopierRequest,
     WhaleAssetsResponse,
+    MultiWhaleBacktestRequest,
+    MultiWhaleBacktestResponse,
 )
 from app.services.price_service import fetch_and_store_binance_prices
 from app.services.copier_manager import copier_manager
@@ -30,6 +33,354 @@ from app.services.metrics_service import _commit_with_retry
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _simulate_copy_trades(
+    session,
+    trades: Sequence,
+    *,
+    initial_deposit: Decimal,
+    recommended_pct: float,
+    used_pct: float,
+    fee_rate: Decimal,
+    slippage_rate: Decimal,
+    leverage: Decimal,
+    include_price_points: bool,
+    preload_prices: bool,
+    asset_filter: set[str] | None,
+    trades_limit: int,
+    trades_offset: int,
+) -> tuple[BacktestSummary, list[BacktestTradeResult], list[dict], dict[str, list[dict]] | None, int]:
+    closing_dirs = {
+        TradeDirection.CLOSE_LONG,
+        TradeDirection.CLOSE_SHORT,
+        TradeDirection.SELL,
+        TradeDirection.WITHDRAW,
+    }
+    entry_dirs = {TradeDirection.LONG, TradeDirection.SHORT, TradeDirection.BUY}
+
+    # preload price history for marking open positions (best-effort)
+    assets = {(getattr(t, "base_asset", None) or "").upper() for t in trades if getattr(t, "base_asset", None)}
+    assets.discard("")
+    assets_used = sorted(asset_filter) if asset_filter else sorted(assets)
+    price_cache: dict[str, tuple[list[datetime], list[Decimal]]] = {}
+
+    # determine backtest window for price fetch
+    start_ts = trades[0].timestamp.replace(second=0, microsecond=0) if trades else None
+    end_ts = trades[-1].timestamp.replace(second=0, microsecond=0) if trades else None
+
+    if assets and start_ts and end_ts:
+        if preload_prices:
+            try:
+                rows = (
+                    session.query(
+                        PriceHistory.asset_symbol, func.min(PriceHistory.timestamp), func.max(PriceHistory.timestamp)
+                    )
+                    .filter(PriceHistory.asset_symbol.in_(list(assets)))
+                    .group_by(PriceHistory.asset_symbol)
+                    .all()
+                )
+                covered: set[str] = set()
+                for sym, min_ts, max_ts in rows:
+                    if min_ts <= start_ts and max_ts >= end_ts:
+                        covered.add(sym)
+                missing_assets = assets - covered
+                if missing_assets:
+                    fetch_and_store_binance_prices(
+                        session,
+                        assets=list(missing_assets),
+                        timeframe="1m",
+                        since=start_ts - timedelta(minutes=1),
+                        until=end_ts + timedelta(minutes=1),
+                        limit=1500,
+                    )
+                    session.flush()
+                    _commit_with_retry(session)
+            except OperationalError as exc:
+                session.rollback()
+                logger.warning(
+                    "price preload commit failed; continuing without new prices: %s", exc
+                )
+            except Exception as exc:
+                session.rollback()
+                logger.warning(
+                    "price preload failed; continuing without new prices: %s", exc
+                )
+
+        rows = (
+            session.query(PriceHistory.asset_symbol, PriceHistory.timestamp, PriceHistory.price_usd)
+            .filter(
+                PriceHistory.asset_symbol.in_(list(assets)),
+                PriceHistory.timestamp >= start_ts - timedelta(minutes=5),
+                PriceHistory.timestamp <= end_ts + timedelta(minutes=5),
+            )
+            .order_by(PriceHistory.asset_symbol, PriceHistory.timestamp)
+            .all()
+        )
+        for sym, ts, price in rows:
+            if price is None:
+                continue
+            ts_list, px_list = price_cache.setdefault(sym, ([], []))
+            ts_list.append(ts)
+            px_list.append(Decimal(price))
+
+    def _mark_price(sym: str | None, ts: datetime, fallback: Decimal | None) -> Decimal | None:
+        if sym is None:
+            return fallback
+        series = price_cache.get(sym)
+        if not series:
+            return fallback
+        ts_list, px_list = series
+        idx = bisect_right(ts_list, ts) - 1
+        if idx < 0:
+            return fallback
+        return px_list[idx]
+
+    positions: dict[str, dict[str, Decimal]] = {}
+    cash = initial_deposit
+    cumulative_net = Decimal(0)
+    total_fees = Decimal(0)
+    total_slippage = Decimal(0)
+    gross_pnl = Decimal(0)
+    wins = 0
+    closing_count = 0
+    results: list[BacktestTradeResult] = []
+    equity_curve: list[dict] = []
+
+    def _compute_drawdown(curve: list[dict]) -> tuple[Decimal, Decimal]:
+        if not curve:
+            return Decimal(0), Decimal(0)
+        peak = Decimal(curve[0]["equity_usd"])
+        max_dd = Decimal(0)
+        max_dd_usd = Decimal(0)
+        for point in curve:
+            eq = Decimal(point["equity_usd"])
+            if eq > peak:
+                peak = eq
+            drawdown_abs = peak - eq
+            dd_ratio = drawdown_abs / peak if peak > 0 else Decimal(0)
+            if dd_ratio > max_dd:
+                max_dd = dd_ratio
+                max_dd_usd = drawdown_abs
+        return max_dd, max_dd_usd
+
+    def _unrealized_and_margin(ts: datetime) -> tuple[Decimal, Decimal]:
+        unreal = Decimal(0)
+        margin_total = Decimal(0)
+        for sym, pos in positions.items():
+            qty = pos.get("qty", Decimal(0))
+            margin_total += pos.get("margin", Decimal(0))
+            if qty == 0:
+                continue
+            avg = pos.get("avg_price", Decimal(0))
+            mark = _mark_price(sym, ts, avg)
+            if mark is None:
+                continue
+            if qty > 0:
+                unreal += (mark - avg) * qty
+            else:
+                unreal += (avg - mark) * abs(qty)
+        return unreal, margin_total
+
+    current_idx = 0
+    trade_count = len(trades)
+    trade_items = list(trades)
+
+    def _record_equity(ts: datetime) -> None:
+        unreal, margin_total = _unrealized_and_margin(ts)
+        equity = cash + margin_total + unreal
+        cumulative_net_local = equity - initial_deposit
+        equity_curve.append(
+            {"timestamp": ts, "equity_usd": float(equity), "unrealized_pnl_usd": float(unreal)}
+        )
+        return cumulative_net_local
+
+    # iterate minute by minute and process trades that occur within or before that minute
+    if start_ts and end_ts:
+        delta_minutes = int((end_ts - start_ts).total_seconds() // 60)
+        step_minutes = 1
+        if delta_minutes > 60 * 24 * 60:
+            step_minutes = 5
+        if delta_minutes > 60 * 24 * 180:
+            step_minutes = 15
+        ts = start_ts
+        while ts <= end_ts:
+            # process trades with timestamp <= end of this minute
+            minute_end = ts.replace(second=59, microsecond=999999)
+            while current_idx < trade_count and trade_items[current_idx].timestamp <= minute_end:
+                t = trade_items[current_idx]
+                current_idx += 1
+                direction_raw = getattr(t, "direction", None)
+                direction = direction_raw if hasattr(direction_raw, "value") else TradeDirection(str(direction_raw))
+                notional = Decimal(abs(getattr(t, "value_usd", 0) or 0))
+                scale = Decimal(used_pct)
+                current_unreal, current_margin = _unrealized_and_margin(t.timestamp)
+                equity_now = cash + current_margin + current_unreal
+                desired_notional = notional * scale
+                per_trade_cap_ratio = Decimal("0.05")  # at most 5% of levered equity per trade
+                if direction in closing_dirs:
+                    user_notional = desired_notional
+                else:
+                    max_notional_overall = equity_now * leverage
+                    max_notional_per_trade = max_notional_overall * per_trade_cap_ratio
+                    user_notional = min(desired_notional, max_notional_per_trade) if max_notional_overall > 0 else Decimal(0)
+                if user_notional <= 0:
+                    continue
+                price = None
+                try:
+                    amount_base = getattr(t, "amount_base", None)
+                    if getattr(t, "value_usd", None) is not None and amount_base not in (None, 0):
+                        price = Decimal(abs(t.value_usd)) / Decimal(abs(amount_base))
+                except Exception:
+                    price = None
+                sym_key = (getattr(t, "base_asset", None) or "").upper() or None
+                price = _mark_price(sym_key, t.timestamp, price)
+                if price is None or price <= 0:
+                    continue
+                base_label = getattr(t, "base_asset", None) or "UNKNOWN"
+                pos_key = sym_key or base_label
+                pos = positions.setdefault(
+                    pos_key, {"qty": Decimal(0), "avg_price": Decimal(0), "margin": Decimal(0)}
+                )
+
+                net_change = Decimal(0)
+                pnl = Decimal(0)
+                executed_notional = user_notional
+                fee = Decimal(0)
+                slip = Decimal(0)
+
+                if direction in entry_dirs:
+                    fee = user_notional * fee_rate
+                    slip = user_notional * slippage_rate
+                    margin_required = user_notional / leverage
+                    total_cost = margin_required + fee + slip
+                    if total_cost > cash:
+                        afford_scale = cash / total_cost if total_cost > 0 else Decimal(0)
+                        user_notional *= afford_scale
+                        fee = user_notional * fee_rate
+                        slip = user_notional * slippage_rate
+                        margin_required = user_notional / leverage
+                        total_cost = margin_required + fee + slip
+                        if user_notional <= 0 or total_cost > cash:
+                            continue
+                    executed_notional = user_notional
+                    total_fees += fee
+                    total_slippage += slip
+
+                    qty = user_notional / price
+                    signed_qty = qty if direction in {TradeDirection.LONG, TradeDirection.BUY} else -qty
+                    if signed_qty != 0:
+                        new_qty = pos["qty"] + signed_qty
+                        if new_qty == 0:
+                            pos["qty"] = Decimal(0)
+                            pos["avg_price"] = Decimal(0)
+                            pos["margin"] = Decimal(0)
+                        else:
+                            existing_cost = pos["avg_price"] * pos["qty"]
+                            added_cost = price * signed_qty
+                            pos["qty"] = new_qty
+                            pos["avg_price"] = (existing_cost + added_cost) / new_qty if new_qty != 0 else Decimal(0)
+                            pos["margin"] += margin_required
+                    cash -= (margin_required + fee + slip)
+                    net_change -= (fee + slip)
+                elif direction in closing_dirs:
+                    pos_qty = pos["qty"]
+                    if pos_qty == 0:
+                        continue
+                    qty = user_notional / price
+                    close_qty = min(abs(qty), abs(pos_qty))
+                    if close_qty <= 0:
+                        continue
+                    executed_notional = close_qty * price
+                    fee = executed_notional * fee_rate
+                    slip = executed_notional * slippage_rate
+                    total_fees += fee
+                    total_slippage += slip
+                    signed_close = close_qty if pos_qty > 0 else -close_qty
+                    avg = pos["avg_price"]
+                    pnl = (price - avg) * signed_close if pos_qty > 0 else (avg - price) * abs(signed_close)
+                    margin_release = pos["margin"] * (close_qty / abs(pos_qty)) if pos["margin"] else Decimal(0)
+                    pos["qty"] = pos_qty - signed_close
+                    if pos["qty"] == 0:
+                        pos["avg_price"] = Decimal(0)
+                        pos["margin"] = Decimal(0)
+                    else:
+                        pos["margin"] -= margin_release
+                    net = pnl - fee - slip
+                    gross_pnl += pnl
+                    net_change += net
+                    cash += margin_release + net
+                    closing_count += 1
+                    if net > 0:
+                        wins += 1
+                else:
+                    continue
+
+                unreal, margin_total = _unrealized_and_margin(t.timestamp)
+                equity = cash + margin_total + unreal
+                cumulative_net = equity - initial_deposit
+                results.append(
+                    BacktestTradeResult(
+                        id=getattr(t, "id", None) or current_idx,
+                        timestamp=t.timestamp,
+                        direction=str(direction.value if hasattr(direction, "value") else direction),
+                        base_asset=getattr(t, "base_asset", None),
+                        notional_usd=float(executed_notional),
+                        pnl_usd=float(pnl),
+                        fee_usd=float(fee),
+                        slippage_usd=float(slip),
+                        net_pnl_usd=float(net_change if net_change != 0 else (pnl - fee - slip)),
+                        cumulative_pnl_usd=float(cumulative_net),
+                        equity_usd=float(equity),
+                        unrealized_pnl_usd=float(unreal),
+                        position_size_base=float(pos["qty"]) if pos["qty"] is not None else None,
+                    )
+                )
+
+            _record_equity(ts.replace(second=0, microsecond=0))
+            ts = ts + timedelta(minutes=step_minutes)
+
+    if not equity_curve and trades:
+        _record_equity(trades[-1].timestamp)
+
+    max_dd_ratio, max_dd_usd = _compute_drawdown(equity_curve)
+    roi = float(cumulative_net / initial_deposit * Decimal(100)) if initial_deposit > 0 else 0.0
+    win_rate = float(wins) / float(closing_count) * 100 if closing_count > 0 else None
+    max_drawdown_percent = float(max_dd_ratio * Decimal(100)) if max_dd_ratio is not None else None
+    max_drawdown_usd = float(max_dd_usd) if max_dd_usd is not None else None
+
+    summary = BacktestSummary(
+        initial_deposit_usd=float(initial_deposit),
+        recommended_position_pct=recommended_pct * 100.0,
+        used_position_pct=used_pct * 100.0,
+        leverage_used=float(leverage),
+        asset_symbols=assets_used,
+        total_fees_usd=float(total_fees),
+        total_slippage_usd=float(total_slippage),
+        gross_pnl_usd=float(gross_pnl),
+        net_pnl_usd=float(cumulative_net),
+        roi_percent=roi,
+        trades_copied=len(results),
+        win_rate_percent=win_rate,
+        max_drawdown_percent=max_drawdown_percent,
+        max_drawdown_usd=max_drawdown_usd,
+        start=trades[0].timestamp if trades else None,
+        end=trades[-1].timestamp if trades else None,
+    )
+
+    total_trades = len(results)
+    start_idx = min(trades_offset, total_trades)
+    end_idx = min(start_idx + trades_limit, total_trades)
+    trade_slice = results[start_idx:end_idx]
+
+    price_points = None
+    if include_price_points:
+        price_points = {
+            sym: [{"timestamp": ts, "price": float(p)} for ts, p in zip(series[0], series[1])]
+            for sym, series in price_cache.items()
+        }
+
+    return summary, trade_slice, equity_curve, price_points, total_trades
 
 
 def _ensure_backtest_runs_table(session, retries: int = 3, delay: float = 1.0) -> bool:
@@ -584,6 +935,176 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
             trades_total=total_trades,
             trades_limit=trades_limit,
             trades_offset=start_idx,
+        )
+
+
+@router.post("/copier/multi", response_model=MultiWhaleBacktestResponse)
+def run_multi_whale_backtest(payload: MultiWhaleBacktestRequest) -> MultiWhaleBacktestResponse:
+    with SessionLocal() as session:
+        chain_obj = session.scalar(select(Chain).where(Chain.slug == payload.chain.lower()))
+        if not chain_obj:
+            raise HTTPException(status_code=404, detail="Chain not found")
+
+        addresses_lc = [addr.lower() for addr in payload.addresses]
+        whales = (
+            session.query(Whale)
+            .filter(Whale.chain_id == chain_obj.id)
+            .filter(func.lower(Whale.address).in_(addresses_lc))
+            .all()
+        )
+        if not whales:
+            raise HTTPException(status_code=404, detail="No whales found for requested addresses")
+
+        entry_dirs = {TradeDirection.LONG, TradeDirection.SHORT, TradeDirection.BUY}
+        asset_filter = {sym.upper() for sym in payload.asset_symbols} if payload.asset_symbols else None
+
+        trade_query = (
+            session.query(Trade)
+            .filter(Trade.whale_id.in_([w.id for w in whales]), Trade.direction.in_(entry_dirs))
+            .order_by(Trade.timestamp.asc(), Trade.id.asc())
+        )
+        if payload.start:
+            trade_query = trade_query.filter(Trade.timestamp >= payload.start)
+        if payload.end:
+            trade_query = trade_query.filter(Trade.timestamp <= payload.end)
+        if asset_filter:
+            trade_query = trade_query.filter(Trade.base_asset.in_(list(asset_filter)))
+        trades = trade_query.all()
+
+        initial_deposit = Decimal(payload.initial_deposit_usd)
+        used_pct = (
+            float(payload.position_size_pct) / 100.0
+            if payload.position_size_pct is not None
+            else 1.0
+        )
+        used_pct = max(0.0, min(used_pct, 2.0))
+        recommended_pct = used_pct
+        fee_rate = Decimal(payload.fee_bps) / Decimal(10_000)
+        slippage_rate = Decimal(payload.slippage_bps) / Decimal(10_000)
+        leverage = Decimal(payload.leverage or 1.0)
+        leverage = max(Decimal("0.1"), min(leverage, Decimal("100")))
+
+        window = timedelta(minutes=payload.align_window_minutes)
+        entries = [
+            (
+                t.timestamp,
+                (t.base_asset or "").upper(),
+                TradeDirection(t.direction) if isinstance(t.direction, str) else t.direction,
+                t.value_usd,
+                t.whale_id,
+            )
+            for t in trades
+            if t.base_asset and t.value_usd is not None
+        ]
+        entries.sort(key=lambda x: x[0])
+
+        signals: list[dict[str, Any]] = []
+        last_signal_time: dict[tuple[str, str], datetime] = {}
+        for i, (ts, asset, direction, value_usd, wid) in enumerate(entries):
+            if not asset:
+                continue
+            dir_sign = TradeDirection.LONG if direction in {TradeDirection.LONG, TradeDirection.BUY} else TradeDirection.SHORT
+            key = (asset, dir_sign.value if hasattr(dir_sign, "value") else str(dir_sign))
+            if key in last_signal_time and (ts - last_signal_time[key]) <= window:
+                continue
+            aligned_ids = {wid}
+            notionals: list[float] = []
+            try:
+                notionals.append(abs(float(value_usd)))
+            except Exception:
+                pass
+            j = i + 1
+            while j < len(entries) and entries[j][0] - ts <= window:
+                ts2, asset2, dir2, val2, wid2 = entries[j]
+                dir2_sign = TradeDirection.LONG if dir2 in {TradeDirection.LONG, TradeDirection.BUY} else TradeDirection.SHORT
+                if asset2 == asset and dir2_sign == dir_sign:
+                    aligned_ids.add(wid2)
+                    try:
+                        notionals.append(abs(float(val2)))
+                    except Exception:
+                        pass
+                j += 1
+            if len(aligned_ids) >= payload.min_whales:
+                notional_avg = sum(notionals) / len(notionals) if notionals else 0.0
+                if notional_avg <= 0:
+                    continue
+                signals.append(
+                    {
+                        "timestamp": ts,
+                        "asset": asset,
+                        "direction": dir_sign,
+                        "notional_usd": notional_avg,
+                        "whales": aligned_ids,
+                    }
+                )
+                last_signal_time[key] = ts
+            if payload.max_trades and len(signals) >= payload.max_trades:
+                break
+
+        pseudo_trades: list[SimpleNamespace] = []
+        for idx, sig in enumerate(signals, start=1):
+            pseudo_trades.append(
+                SimpleNamespace(
+                    id=idx,
+                    timestamp=sig["timestamp"],
+                    base_asset=sig["asset"],
+                    direction=sig["direction"],
+                    value_usd=sig["notional_usd"],
+                    amount_base=None,
+                )
+            )
+
+        if not pseudo_trades:
+            empty_summary = BacktestSummary(
+                initial_deposit_usd=float(initial_deposit),
+                recommended_position_pct=recommended_pct * 100.0,
+                used_position_pct=used_pct * 100.0,
+                leverage_used=float(leverage),
+                asset_symbols=sorted(asset_filter) if asset_filter else [],
+                total_fees_usd=0.0,
+                total_slippage_usd=0.0,
+                gross_pnl_usd=0.0,
+                net_pnl_usd=0.0,
+                roi_percent=0.0,
+                trades_copied=0,
+                win_rate_percent=None,
+                max_drawdown_percent=0.0,
+                max_drawdown_usd=0.0,
+                start=None,
+                end=None,
+            )
+            return MultiWhaleBacktestResponse(
+                summary=empty_summary,
+                trades=[],
+                equity_curve=[],
+                price_points=None,
+                trades_total=0,
+                signals_total=0,
+            )
+
+        summary, trade_slice, equity_curve, price_points, total_trades = _simulate_copy_trades(
+            session,
+            pseudo_trades,
+            initial_deposit=initial_deposit,
+            recommended_pct=recommended_pct,
+            used_pct=used_pct,
+            fee_rate=fee_rate,
+            slippage_rate=slippage_rate,
+            leverage=leverage,
+            include_price_points=payload.include_price_points,
+            preload_prices=payload.preload_prices,
+            asset_filter=asset_filter,
+            trades_limit=len(pseudo_trades),
+            trades_offset=0,
+        )
+
+        return MultiWhaleBacktestResponse(
+            summary=summary,
+            trades=trade_slice,
+            equity_curve=equity_curve,
+            price_points=price_points,
+            trades_total=total_trades,
+            signals_total=len(signals),
         )
 
 
