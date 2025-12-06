@@ -45,6 +45,7 @@ export default function WhaleDetail() {
   const [paidImportStart, setPaidImportStart] = useState<string>('');
   const [paidImportEnd, setPaidImportEnd] = useState<string>('');
   const [paidImportStatus, setPaidImportStatus] = useState<string | null>(null);
+  const [paidImportIsError, setPaidImportIsError] = useState(false);
   const [paidImportLoading, setPaidImportLoading] = useState(false);
 
   const fillDailySeries = <T extends { timestamp: string }>(
@@ -388,6 +389,7 @@ export default function WhaleDetail() {
                     if (!paidImportStart || !paidImportEnd) return;
                     setPaidImportLoading(true);
                     setPaidImportStatus(null);
+                    setPaidImportIsError(false);
                     try {
                       const res = await api.importHyperliquidPaidHistory(
                         chain,
@@ -396,9 +398,16 @@ export default function WhaleDetail() {
                         new Date(paidImportEnd).toISOString()
                       );
                       setPaidImportStatus(`Imported ${res.imported} fills, skipped ${res.skipped}.`);
+                      setPaidImportIsError(false);
                       setRefreshKey((k) => k + 1);
                     } catch (err) {
-                      setPaidImportStatus(err instanceof Error ? err.message : 'Import failed');
+                      const rawMessage = err instanceof Error ? err.message : 'Import failed';
+                      const normalizedMessage =
+                        rawMessage.toLowerCase().includes('aws login') || (err as { status?: number })?.status === 401
+                          ? 'AWS login required. Run `aws login` locally, then retry the Hyperliquid import.'
+                          : rawMessage;
+                      setPaidImportStatus(normalizedMessage);
+                      setPaidImportIsError(true);
                     } finally {
                       setPaidImportLoading(false);
                     }
@@ -410,7 +419,9 @@ export default function WhaleDetail() {
               </div>
             </div>
             {paidImportStatus && (
-              <p className="text-xs text-muted-foreground">{paidImportStatus}</p>
+              <p className={`text-xs ${paidImportIsError ? 'text-destructive' : 'text-muted-foreground'}`}>
+                {paidImportStatus}
+              </p>
             )}
           </div>
         </div>

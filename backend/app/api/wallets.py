@@ -36,7 +36,7 @@ from app.services.metrics_service import (
     rebuild_portfolio_history_from_trades,
 )
 from app.core.time_utils import now
-from app.services.hyperliquid_paid_import import import_hl_history_from_s3
+from app.services.hyperliquid_paid_import import AWSLoginRequired, import_hl_history_from_s3
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -616,5 +616,8 @@ async def import_hyperliquid_paid_history(
         end = payload.end_date.date()
         if start > end:
             raise HTTPException(status_code=400, detail="start_date must be before end_date")
-        result = import_hl_history_from_s3(session, whale, start=start, end=end)
+        try:
+            result = import_hl_history_from_s3(session, whale, start=start, end=end)
+        except AWSLoginRequired as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
         return result

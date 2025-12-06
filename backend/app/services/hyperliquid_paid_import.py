@@ -10,7 +10,14 @@ from pathlib import Path
 
 import boto3
 import lz4.frame
-from botocore.exceptions import NoCredentialsError
+from botocore.exceptions import (
+    ClientError,
+    LoginError,
+    LoginRefreshRequired,
+    NoCredentialsError,
+    SSOError,
+    UnauthorizedSSOTokenError,
+)
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError, OperationalError
 from sqlalchemy.orm import Session
@@ -20,6 +27,46 @@ from app.services.metrics_service import recompute_wallet_metrics, _commit_with_
 from app.core.time_utils import now
 from app.core.config import settings
 from app.services.backfill_progress import BackfillProgressTracker
+
+
+AWS_LOGIN_MESSAGE = "AWS login required or expired. Run `aws login` and retry."
+
+
+class AWSLoginRequired(Exception):
+    """Raised when AWS credentials are missing or expired for Hyperliquid S3 access."""
+
+
+def _maybe_raise_auth_error(exc: Exception) -> None:
+    """Normalize common AWS auth errors into a single exception with a clear message."""
+    auth_error_codes = {"AccessDenied", "AccessDeniedException", "ExpiredToken", "ExpiredTokenException"}
+    if isinstance(
+        exc,
+        (NoCredentialsError, LoginRefreshRequired, UnauthorizedSSOTokenError, SSOError, LoginError),
+    ):
+        raise AWSLoginRequired(AWS_LOGIN_MESSAGE) from exc
+    if isinstance(exc, ClientError):
+        code = (exc.response or {}).get("Error", {}).get("Code")
+        if code in auth_error_codes:
+            raise AWSLoginRequired(AWS_LOGIN_MESSAGE) from exc
+    msg = str(exc).lower()
+    if "refresh token has expired" in msg or "session token is expired" in msg:
+        raise AWSLoginRequired(AWS_LOGIN_MESSAGE) from exc
+
+
+def _build_s3_client():
+    """Create an S3 client and force credential resolution to catch expired AWS logins early."""
+    aws_profile = settings.aws_profile or os.environ.get("AWS_PROFILE")
+    try:
+        boto3_session = boto3.Session(profile_name=aws_profile) if aws_profile else boto3.Session()
+        creds = boto3_session.get_credentials()
+        if creds is None:
+            raise AWSLoginRequired(AWS_LOGIN_MESSAGE)
+        # Force resolution of the credentials to trigger any refresh errors immediately.
+        creds.get_frozen_credentials()
+        return boto3_session.client("s3")
+    except Exception as exc:  # noqa: BLE001
+        _maybe_raise_auth_error(exc)
+        raise
 
 
 def _daterange(start: date, end: date) -> Iterable[date]:
@@ -159,13 +206,14 @@ def import_hl_history_from_s3(
         return {"imported": 0, "skipped": 0, "missing_chain": True}
     chain_id = chain.id
 
-    # Use AWS profile from settings or environment variable
-    aws_profile = settings.aws_profile or os.environ.get("AWS_PROFILE")
-    if aws_profile:
-        boto3_session = boto3.Session(profile_name=aws_profile)
-        s3 = boto3_session.client("s3")
-    else:
-        s3 = boto3.client("s3")
+    # Use AWS profile from settings or environment variable and fail fast if login is missing/expired.
+    try:
+        s3 = _build_s3_client()
+    except AWSLoginRequired:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        _maybe_raise_auth_error(exc)
+        raise
     bucket = "hl-mainnet-node-data"
     cache_root = Path(__file__).resolve().parent.parent / "data" / "hyperliquid_s3"
     prefixes = []
@@ -177,12 +225,16 @@ def import_hl_history_from_s3(
     def _iter_s3_keys(prefix: str):
         continuation = None
         while True:
-            resp = s3.list_objects_v2(
-                Bucket=bucket,
-                Prefix=prefix,
-                RequestPayer="requester",
-                **({"ContinuationToken": continuation} if continuation else {}),
-            )
+            try:
+                resp = s3.list_objects_v2(
+                    Bucket=bucket,
+                    Prefix=prefix,
+                    RequestPayer="requester",
+                    **({"ContinuationToken": continuation} if continuation else {}),
+                )
+            except Exception as exc:  # noqa: BLE001
+                _maybe_raise_auth_error(exc)
+                raise
             for obj in resp.get("Contents", []):
                 yield obj["Key"]
             if not resp.get("IsTruncated"):
@@ -236,9 +288,9 @@ def import_hl_history_from_s3(
                     continue
                 seen_keys.add(key)
                 keys_to_process.append(key)
-        except NoCredentialsError:
-            s3_errors.append("Missing AWS credentials: processed cached Hyperliquid files only.")
-            s3_available = False
+        except AWSLoginRequired:
+            # Surface auth issues immediately so the API can inform the frontend.
+            raise
         except Exception as exc:  # noqa: BLE001
             s3_errors.append(f"S3 list failed for {prefix}: {exc}")
             continue
@@ -311,21 +363,17 @@ def import_hl_history_from_s3(
             if not s3_available:
                 missing_files += 1
                 continue
-            try:
-                obj = s3.get_object(Bucket=bucket, Key=key, RequestPayer="requester")
-                body = obj["Body"]
-                with open(cached_path, "wb") as fh:
-                    fh.write(body.read())
-                downloaded_files += 1
-            except NoCredentialsError:
-                s3_errors.append("Missing AWS credentials while downloading Hyperliquid history.")
-                s3_available = False
-                missing_files += 1
-                continue
-            except Exception as exc:  # noqa: BLE001
-                s3_errors.append(f"Failed to download {key}: {exc}")
-                missing_files += 1
-                continue
+        try:
+            obj = s3.get_object(Bucket=bucket, Key=key, RequestPayer="requester")
+            body = obj["Body"]
+            with open(cached_path, "wb") as fh:
+                fh.write(body.read())
+            downloaded_files += 1
+        except Exception as exc:  # noqa: BLE001
+            _maybe_raise_auth_error(exc)
+            s3_errors.append(f"Failed to download {key}: {exc}")
+            missing_files += 1
+            continue
 
         read_ok = _read_cached_file(cached_path)
         if not read_ok:
@@ -338,10 +386,8 @@ def import_hl_history_from_s3(
                         fh.write(body.read())
                     redownloaded_files += 1
                     read_ok = _read_cached_file(cached_path)
-                except NoCredentialsError:
-                    s3_errors.append("Missing AWS credentials while re-downloading Hyperliquid history.")
-                    s3_available = False
                 except Exception as exc:  # noqa: BLE001
+                    _maybe_raise_auth_error(exc)
                     s3_errors.append(f"Failed to re-download {key}: {exc}")
             if not read_ok:
                 missing_files += 1

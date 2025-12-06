@@ -15,12 +15,47 @@ const baseUrl =
   import.meta.env.NEXT_PUBLIC_API_BASE_URL ||
   'http://localhost:8000';
 
+async function handleError(path: string, res: Response): Promise<never> {
+  let bodyText = '';
+  try {
+    bodyText = await res.text();
+  } catch {
+    // ignore parsing errors; we'll fall back to status text
+  }
+
+  let detail: string | undefined;
+  if (bodyText) {
+    try {
+      const parsed = JSON.parse(bodyText);
+      if (parsed && typeof parsed === 'object' && 'detail' in parsed) {
+        const rawDetail = (parsed as { detail: unknown }).detail;
+        if (typeof rawDetail === 'string') {
+          detail = rawDetail;
+        } else {
+          detail = JSON.stringify(rawDetail);
+        }
+      } else if (typeof parsed === 'string') {
+        detail = parsed;
+      }
+    } catch {
+      detail = bodyText;
+    }
+  }
+
+  const message = (detail && detail.trim()) || `API error ${res.status} for ${path}: ${res.statusText}`;
+  const error = new Error(message) as Error & { status?: number; rawBody?: string };
+  error.name = 'ApiError';
+  error.status = res.status;
+  error.rawBody = bodyText || undefined;
+  throw error;
+}
+
 async function apiGet<T>(path: string): Promise<T> {
   const res = await fetch(`${baseUrl}${path}`, {
     headers: { 'Content-Type': 'application/json' },
   });
   if (!res.ok) {
-    throw new Error(`API error ${res.status} for ${path}`);
+    return handleError(path, res);
   }
   return res.json() as Promise<T>;
 }
@@ -32,8 +67,7 @@ async function apiPost<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(`API error ${res.status} for ${path}: ${detail || res.statusText}`);
+    return handleError(path, res);
   }
   return res.json() as Promise<T>;
 }
@@ -45,8 +79,7 @@ async function apiPatch<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(`API error ${res.status} for ${path}: ${detail || res.statusText}`);
+    return handleError(path, res);
   }
   return res.json() as Promise<T>;
 }
@@ -57,8 +90,7 @@ async function apiDelete<T>(path: string): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
   });
   if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(`API error ${res.status} for ${path}: ${detail || res.statusText}`);
+    return handleError(path, res);
   }
   return res.json() as Promise<T>;
 }
