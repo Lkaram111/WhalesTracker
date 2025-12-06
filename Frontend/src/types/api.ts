@@ -203,6 +203,33 @@ export interface CopierBacktestResponse {
   trades_offset: number;
 }
 
+export interface MultiWhaleBacktestRequest {
+  chain: ChainId;
+  addresses: string[];
+  min_whales: number;
+  initial_deposit_usd: number;
+  position_size_pct?: number | null;
+  fee_bps?: number;
+  slippage_bps?: number;
+  leverage?: number;
+  start?: string;
+  end?: string;
+  max_trades?: number;
+  asset_symbols?: string[];
+  include_price_points?: boolean;
+  preload_prices?: boolean;
+  align_window_minutes?: number;
+}
+
+export interface MultiWhaleBacktestResponse {
+  summary: BacktestSummary;
+  trades: BacktestTrade[];
+  equity_curve: EquityCurvePoint[];
+  price_points?: Record<string, PricePoint[]>;
+  trades_total: number;
+  signals_total: number;
+}
+
 export interface BacktestRunSummary {
   id: number;
   whale_id: string;

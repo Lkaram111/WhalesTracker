@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/apiClient';
-import type { ChainId, CopierBacktestResponse, WhaleSummary } from '@/types/api';
+import type {
+  ChainId,
+  CopierBacktestResponse,
+  MultiWhaleBacktestResponse,
+  WhaleSummary,
+} from '@/types/api';
 import { formatUSDExact, formatPercent, formatDate, formatAddress } from '@/lib/formatters';
 import { cn } from '@/lib/utils';
 import { Loader2, Play, SlidersHorizontal, CheckSquare, Square } from 'lucide-react';
@@ -9,8 +14,12 @@ const chainOptions: ChainId[] = ['hyperliquid', 'ethereum', 'bitcoin'];
 const TRADE_PAGE_SIZE = 50;
 
 export default function CopierBacktest() {
+  const [mode, setMode] = useState<'single' | 'multi'>('single');
   const [chain, setChain] = useState<ChainId>('hyperliquid');
   const [address, setAddress] = useState('');
+  const [addressesInput, setAddressesInput] = useState('');
+  const [minWhales, setMinWhales] = useState(3);
+  const [alignMinutes, setAlignMinutes] = useState(5);
   const [whales, setWhales] = useState<WhaleSummary[]>([]);
   const [assets, setAssets] = useState<string[]>([]);
   const [selectedAssets, setSelectedAssets] = useState<string[]>([]);
@@ -22,10 +31,11 @@ export default function CopierBacktest() {
   const [start, setStart] = useState<string>('');
   const [end, setEnd] = useState<string>('');
   const [includePrices, setIncludePrices] = useState(false);
+  const [preloadPrices, setPreloadPrices] = useState(true);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<CopierBacktestResponse | null>(null);
+  const [result, setResult] = useState<CopierBacktestResponse | MultiWhaleBacktestResponse | null>(null);
   const [lastPayload, setLastPayload] = useState<Record<string, unknown> | null>(null);
 
   // preload whales for selection
@@ -37,7 +47,7 @@ export default function CopierBacktest() {
       .catch(() => setWhales([]));
   }, []);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmitSingle = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
@@ -56,6 +66,7 @@ export default function CopierBacktest() {
       if (start) payload.start = new Date(start).toISOString();
       if (end) payload.end = new Date(end).toISOString();
       if (includePrices) payload.include_price_points = true;
+      if (preloadPrices === false) payload.preload_prices = false;
       payload.trades_limit = TRADE_PAGE_SIZE;
       payload.trades_offset = 0;
       setLastPayload(payload);
@@ -70,7 +81,7 @@ export default function CopierBacktest() {
 
   // fetch assets when chain/address set
   useEffect(() => {
-    if (!chain || !address) {
+    if (mode !== 'single' || !chain || !address) {
       setAssets([]);
       setSelectedAssets([]);
       return;
@@ -84,10 +95,14 @@ export default function CopierBacktest() {
         setAssets([]);
         setSelectedAssets([]);
       });
-  }, [chain, address]);
+  }, [mode, chain, address]);
+
+  const isMultiResult = (
+    res: CopierBacktestResponse | MultiWhaleBacktestResponse | null
+  ): res is MultiWhaleBacktestResponse => !!res && (res as MultiWhaleBacktestResponse).signals_total !== undefined;
 
   const handleLoadMoreTrades = async () => {
-    if (!lastPayload || !result) return;
+    if (!lastPayload || !result || isMultiResult(result)) return;
     const nextOffset = result.trades.length;
     if (nextOffset >= result.trades_total) return;
     setLoadingMore(true);
@@ -114,24 +129,98 @@ export default function CopierBacktest() {
     }
   };
 
-  const hasMoreTrades = result ? result.trades_total > result.trades.length : false;
+  const handleSubmitMulti = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const addresses = addressesInput
+        .split(',')
+        .map((a) => a.trim())
+        .filter((a) => a.length > 0);
+      if (addresses.length < 2) {
+        throw new Error('Please provide at least two whale addresses for multi-whale backtest.');
+      }
+      if (minWhales > addresses.length) {
+        throw new Error('min_whales cannot exceed the number of provided addresses.');
+      }
+      const payload: any = {
+        chain,
+        addresses,
+        min_whales: minWhales,
+        align_window_minutes: alignMinutes,
+        initial_deposit_usd: initialDeposit,
+        fee_bps: feeBps,
+        slippage_bps: slippageBps,
+        leverage,
+        preload_prices: preloadPrices,
+      };
+      if (selectedAssets.length > 0) payload.asset_symbols = selectedAssets;
+      if (positionPct !== null) payload.position_size_pct = positionPct;
+      if (start) payload.start = new Date(start).toISOString();
+      if (end) payload.end = new Date(end).toISOString();
+      if (includePrices) payload.include_price_points = true;
+      payload.max_trades = 2000;
+      const data = await api.runMultiBacktest(payload);
+      setResult(data);
+      setLastPayload(null);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to run multi-whale backtest');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const hasMoreTrades = result && !isMultiResult(result) ? result.trades_total > result.trades.length : false;
 
   return (
     <div className="space-y-6 animate-fade-up">
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-foreground">Copier Backtest</h1>
-          <p className="text-muted-foreground">
-            Simulate copying a whale&apos;s entries/exits with your own capital, including fees & slippage.
-          </p>
-        </div>
-      </div>
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h1 className="text-2xl font-bold text-foreground">
+                {mode === 'multi' ? 'Multi-whale Alignment Backtest' : 'Copier Backtest'}
+              </h1>
+              <p className="text-muted-foreground">
+                {mode === 'multi'
+                  ? 'Simulate entering when multiple whales align on the same asset within a time window.'
+                  : "Simulate copying a whale's entries/exits with your own capital, including fees & slippage."}
+              </p>
+            </div>
+          </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <form onSubmit={handleSubmit} className="card-glass rounded-xl p-4 space-y-4 lg:col-span-1">
-          <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-            <SlidersHorizontal className="h-4 w-4 text-primary" />
-            Backtest Inputs
+        <form
+          onSubmit={mode === 'single' ? handleSubmitSingle : handleSubmitMulti}
+          className="card-glass rounded-xl p-4 space-y-4 lg:col-span-1"
+        >
+          <div className="flex items-center justify-between gap-2 text-sm font-medium text-foreground">
+            <div className="flex items-center gap-2">
+              <SlidersHorizontal className="h-4 w-4 text-primary" />
+              Backtest Inputs
+            </div>
+            <div className="flex rounded-lg border border-border p-1 text-xs">
+              <button
+                type="button"
+                onClick={() => setMode('single')}
+                className={cn(
+                  'px-3 py-1 rounded-md',
+                  mode === 'single' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'
+                )}
+              >
+                Single whale
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode('multi')}
+                className={cn(
+                  'px-3 py-1 rounded-md',
+                  mode === 'multi' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'
+                )}
+              >
+                Multi-whale
+              </button>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -158,86 +247,134 @@ export default function CopierBacktest() {
               </div>
             </div>
 
-            <div className="sm:col-span-2">
-              <label className="text-xs text-muted-foreground uppercase tracking-wider mb-2 block">
-                Select Whale
-              </label>
-              <select
-                value={address}
-                onChange={(e) => {
-                  const selected = whales.find((w) => w.address === e.target.value);
-                  setAddress(e.target.value);
-                  if (selected) {
-                    setChain(selected.chain);
-                  }
-                }}
-                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-              >
-                <option value="">-- Choose from tracked whales --</option>
-                {whales.map((w) => (
-                  <option key={w.id} value={w.address}>
-                    {w.labels && w.labels.length ? w.labels[0] : formatAddress(w.address)} - {w.chain}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="sm:col-span-2">
-              <label className="text-xs text-muted-foreground uppercase tracking-wider mb-2 block">
-                Whale Address
-              </label>
-              <input
-                required
-                value={address}
-                onChange={(e) => setAddress(e.target.value)}
-                placeholder="0x..."
-                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-              />
-            </div>
-
-            {assets.length > 0 && (
-              <div className="sm:col-span-2">
-                <label className="text-xs text-muted-foreground uppercase tracking-wider mb-2 block">
-                  Assets to Copy (optional)
-                </label>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setSelectedAssets([])}
-                    className={cn(
-                      'rounded-lg border px-3 py-1.5 text-xs transition-all',
-                      selectedAssets.length === 0
-                        ? 'border-primary bg-primary/10 text-primary'
-                        : 'border-border text-muted-foreground hover:bg-muted'
-                    )}
+            {mode === 'single' ? (
+              <>
+                <div className="sm:col-span-2">
+                  <label className="text-xs text-muted-foreground uppercase tracking-wider mb-2 block">
+                    Select Whale
+                  </label>
+                  <select
+                    value={address}
+                    onChange={(e) => {
+                      const selected = whales.find((w) => w.address === e.target.value);
+                      setAddress(e.target.value);
+                      if (selected) {
+                        setChain(selected.chain);
+                      }
+                    }}
+                    className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
                   >
-                    All assets
-                  </button>
-                  {assets.map((sym) => {
-                    const active = selectedAssets.includes(sym);
-                    return (
+                    <option value="">-- Choose from tracked whales --</option>
+                    {whales.map((w) => (
+                      <option key={w.id} value={w.address}>
+                        {w.labels && w.labels.length ? w.labels[0] : formatAddress(w.address)} - {w.chain}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="text-xs text-muted-foreground uppercase tracking-wider mb-2 block">
+                    Whale Address
+                  </label>
+                  <input
+                    required
+                    value={address}
+                    onChange={(e) => setAddress(e.target.value)}
+                    placeholder="0x..."
+                    className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  />
+                </div>
+
+                {assets.length > 0 && (
+                  <div className="sm:col-span-2">
+                    <label className="text-xs text-muted-foreground uppercase tracking-wider mb-2 block">
+                      Assets to Copy (optional)
+                    </label>
+                    <div className="flex flex-wrap gap-2">
                       <button
                         type="button"
-                        key={sym}
-                        onClick={() => {
-                          setSelectedAssets((prev) =>
-                            active ? prev.filter((s) => s !== sym) : [...prev, sym]
-                          );
-                        }}
+                        onClick={() => setSelectedAssets([])}
                         className={cn(
-                          'flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs transition-all',
-                          active
+                          'rounded-lg border px-3 py-1.5 text-xs transition-all',
+                          selectedAssets.length === 0
                             ? 'border-primary bg-primary/10 text-primary'
                             : 'border-border text-muted-foreground hover:bg-muted'
                         )}
                       >
-                        {active ? <CheckSquare className="h-3 w-3" /> : <Square className="h-3 w-3" />}
-                        {sym}
+                        All assets
                       </button>
-                    );
-                  })}
+                      {assets.map((sym) => {
+                        const active = selectedAssets.includes(sym);
+                        return (
+                          <button
+                            type="button"
+                            key={sym}
+                            onClick={() => {
+                              setSelectedAssets((prev) =>
+                                active ? prev.filter((s) => s !== sym) : [...prev, sym]
+                              );
+                            }}
+                            className={cn(
+                              'flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs transition-all',
+                              active
+                                ? 'border-primary bg-primary/10 text-primary'
+                                : 'border-border text-muted-foreground hover:bg-muted'
+                            )}
+                          >
+                            {active ? <CheckSquare className="h-3 w-3" /> : <Square className="h-3 w-3" />}
+                            {sym}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="sm:col-span-2">
+                  <label className="text-xs text-muted-foreground uppercase tracking-wider mb-2 block">
+                    Whale Addresses (comma separated)
+                  </label>
+                  <textarea
+                    required
+                    value={addressesInput}
+                    onChange={(e) => setAddressesInput(e.target.value)}
+                    placeholder="0xabc...,0xdef..."
+                    className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+                    rows={3}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Provide at least two addresses. Backtest will trigger when whales align on direction.
+                  </p>
                 </div>
-              </div>
+                <div>
+                  <label className="text-xs text-muted-foreground uppercase tracking-wider mb-2 block">
+                    Minimum Whales Aligned
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={minWhales}
+                    onChange={(e) => setMinWhales(Number(e.target.value))}
+                    className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground uppercase tracking-wider mb-2 block">
+                    Align Window (minutes)
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={60}
+                    value={alignMinutes}
+                    onChange={(e) => setAlignMinutes(Number(e.target.value))}
+                    className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  />
+                </div>
+              </>
             )}
 
             <div>
@@ -351,6 +488,19 @@ export default function CopierBacktest() {
                 Include price points used for marking (caches prices in response)
               </label>
             </div>
+
+            <div className="sm:col-span-2 flex items-center gap-2">
+              <input
+                id="preloadPrices"
+                type="checkbox"
+                checked={preloadPrices}
+                onChange={(e) => setPreloadPrices(e.target.checked)}
+                className="h-4 w-4 rounded border-border text-primary focus:ring-primary"
+              />
+              <label htmlFor="preloadPrices" className="text-sm text-foreground">
+                Fetch missing Binance prices automatically (recommended)
+              </label>
+            </div>
           </div>
 
           {error && (
@@ -365,7 +515,7 @@ export default function CopierBacktest() {
             className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-primary-foreground text-sm font-semibold shadow-md hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-            Run Backtest
+            {mode === 'multi' ? 'Run Multi-Whale Backtest' : 'Run Backtest'}
           </button>
         </form>
 
@@ -397,6 +547,11 @@ export default function CopierBacktest() {
                 <SummaryTile label="Gross PnL" value={formatUSDExact(result.summary.gross_pnl_usd)} />
                 <SummaryTile label="Fees Paid" value={formatUSDExact(result.summary.total_fees_usd)} />
                 <SummaryTile label="Slippage" value={formatUSDExact(result.summary.total_slippage_usd)} />
+                {isMultiResult(result) ? (
+                  <SummaryTile label="Signals Generated" value={result.signals_total} />
+                ) : (
+                  <SummaryTile label="Trades Simulated" value={result.trades_total} />
+                )}
                 <SummaryTile
                   label="Max DD"
                   value={

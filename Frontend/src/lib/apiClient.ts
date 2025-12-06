@@ -138,6 +138,8 @@ export const api = {
     trades_limit?: number;
     trades_offset?: number;
   }) => apiPost<import('@/types/api').CopierBacktestResponse>('/api/v1/backtest/copier', body),
+  runMultiBacktest: (body: import('@/types/api').MultiWhaleBacktestRequest) =>
+    apiPost<import('@/types/api').MultiWhaleBacktestResponse>('/api/v1/backtest/copier/multi', body),
   getWhaleAssets: (chain: string, address: string) =>
     apiGet<import('@/types/api').WhaleAssetsResponse>(
       `/api/v1/backtest/assets?chain=${chain}&address=${address}`
