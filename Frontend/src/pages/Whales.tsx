@@ -76,7 +76,7 @@ export default function Whales() {
   const [page, setPage] = useState(1);
   const [whales, setWhales] = useState<WhaleSummary[]>([]);
   const [total, setTotal] = useState(0);
-  const [pageSize, setPageSize] = useState(5);
+  const [pageSize, setPageSize] = useState(20);
   const [editingWhale, setEditingWhale] = useState<WhaleSummary | null>(null);
   const [tagInput, setTagInput] = useState('');
   const [savingTag, setSavingTag] = useState(false);
