@@ -19,7 +19,7 @@ def main() -> None:
     parser.add_argument("--timeframe", default="1h", help="ccxt timeframe (default: 1h)")
     parser.add_argument("--since", help="ISO datetime UTC start (e.g., 2025-01-01T00:00:00Z)")
     parser.add_argument("--until", help="ISO datetime UTC end (e.g., 2025-02-01T00:00:00Z)")
-    parser.add_argument("--limit", type=int, default=1000, help="Max candles per request")
+    parser.add_argument("--limit", type=int, default=1500, help="Max candles per request")
     args = parser.parse_args()
 
     assets = [a.strip() for a in args.assets.split(",") if a.strip()]

@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Iterable, Sequence
+from typing import Any, Sequence
 
 import ccxt  # type: ignore
-from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models import PriceHistory
+
+
+exchange = ccxt.binance({"enableRateLimit": True})
 
 
 def _exchange_symbol(asset: str) -> str:
@@ -20,25 +22,27 @@ def _exchange_symbol(asset: str) -> str:
     return f"{base}/USDT"
 
 
-def _upsert_price(session: Session, asset: str, ts: datetime, price: Decimal) -> None:
-    payload = {
-        "asset_symbol": asset.upper(),
-        "timestamp": ts,
-        "price_usd": price,
-    }
-    # Manual upsert (no composite unique on price_history)
-    existing = (
-        session.query(PriceHistory)
-        .filter(
-            PriceHistory.asset_symbol == payload["asset_symbol"],
-            PriceHistory.timestamp == payload["timestamp"],
+def bulk_upsert_prices(session: Session, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+
+    bind = session.get_bind()
+    dialect = bind.dialect.name if bind else ""
+
+    if dialect == "sqlite":
+        stmt = sqlite_insert(PriceHistory).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["asset_symbol", "timestamp"], set_={"price_usd": stmt.excluded.price_usd}
         )
-        .one_or_none()
-    )
-    if existing:
-        existing.price_usd = payload["price_usd"]
+        session.execute(stmt)
+    elif dialect in {"postgresql", "postgres"}:
+        stmt = pg_insert(PriceHistory).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["asset_symbol", "timestamp"], set_={"price_usd": stmt.excluded.price_usd}
+        )
+        session.execute(stmt)
     else:
-        session.add(PriceHistory(**payload))
+        session.add_all([PriceHistory(**row) for row in rows])
 
 
 def fetch_and_store_binance_prices(
@@ -47,7 +51,7 @@ def fetch_and_store_binance_prices(
     timeframe: str = "1h",
     since: datetime | None = None,
     until: datetime | None = None,
-    limit: int = 1000,
+    limit: int = 1500,
 ) -> int:
     """
     Fetch OHLCV closes from Binance via ccxt for the given assets and persist to price_history.
@@ -63,12 +67,13 @@ def fetch_and_store_binance_prices(
     Returns:
         int: Number of price rows written/upserted.
     """
-    exchange = ccxt.binance({"enableRateLimit": True})
     written = 0
     since_ms = int(since.timestamp() * 1000) if since else None
     until_ms = int(until.timestamp() * 1000) if until else None
+    batch_size = 1000
 
     for asset in assets:
+        batch: list[dict[str, Any]] = []
         try:
             market = _exchange_symbol(asset)
             cursor = since_ms
@@ -84,7 +89,12 @@ def fetch_and_store_binance_prices(
                         price = Decimal(close)
                     except Exception:
                         continue
-                    _upsert_price(session, asset, ts, price)
+                    batch.append(
+                        {"asset_symbol": asset.upper(), "timestamp": ts, "price_usd": price}
+                    )
+                    if len(batch) >= batch_size:
+                        bulk_upsert_prices(session, batch)
+                        batch.clear()
                     written += 1
                 if len(ohlcv) < limit:
                     break
@@ -94,4 +104,8 @@ def fetch_and_store_binance_prices(
                     break
         except Exception:
             continue
+        finally:
+            if batch:
+                bulk_upsert_prices(session, batch)
+                batch.clear()
     return written

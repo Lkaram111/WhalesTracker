@@ -210,10 +210,10 @@ class CopierBacktestRequest(BaseModel):
     start: datetime | None = Field(default=None, description="Optional start time filter")
     end: datetime | None = Field(default=None, description="Optional end time filter")
     max_trades: int | None = Field(
-        default=None,
+        default=2000,
         ge=1,
         le=5000,
-        description="Optional limit on trades to simulate; defaults to all available",
+        description="Optional limit on trades to simulate; defaults to 2000 if not provided",
     )
     trades_limit: int = Field(
         default=50,
@@ -229,6 +229,10 @@ class CopierBacktestRequest(BaseModel):
     asset_symbols: list[str] | None = Field(
         default=None,
         description="Optional allowlist of asset symbols to include; defaults to all traded assets",
+    )
+    preload_prices: bool = Field(
+        default=True,
+        description="Fetch missing Binance prices for the window; set false if prices are already cached.",
     )
     include_price_points: bool = Field(
         default=False,

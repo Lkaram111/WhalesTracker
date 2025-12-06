@@ -144,6 +144,7 @@ class CopierManager:
 
     def _process_session(self, sess: CopierSession) -> None:
         start_time = sess.last_seen_fill
+        allowed_assets = {a.upper() for a in sess.asset_symbols} if sess.asset_symbols else None
         try:
             fills = hyperliquid_client.get_user_fills(sess.address, start_time=start_time)
         except Exception as exc:  # noqa: PERF203
@@ -164,7 +165,7 @@ class CopierManager:
                     sess.last_seen_fill = ts_int
             coin = fill.get('coin') or fill.get('asset')
             coin_key = coin.upper() if coin else None
-            if sess.asset_symbols and coin and coin.upper() not in [a.upper() for a in sess.asset_symbols]:
+            if allowed_assets and (not coin_key or coin_key not in allowed_assets):
                 continue
             is_buy = True if fill.get('side') in ('B', 'BUY', 'buy') else False
             sz = float(fill.get('sz') or fill.get('size') or fill.get('qty') or 0)
@@ -197,13 +198,13 @@ class CopierManager:
                 and self._leverage_throttle.can_run(f"{sess.id}:{coin}")
             ):
                 try:
-                    hyperliquid_trading_client.update_leverage(coin, sess.leverage, is_cross=sess.is_cross)
+                    hyperliquid_trading_client.update_leverage(coin_key or coin, sess.leverage, is_cross=sess.is_cross)
                     self._leverage_throttle.touch(f"{sess.id}:{coin}")
                 except Exception as exc:
                     # log but continue; some endpoints reject leverage update when already set
                     sess.errors.append(f"leverage error (ignored): {exc}")
             try:
-                order = hyperliquid_trading_client.build_ioc_order(coin=coin, is_buy=is_buy, sz=sz, px=px_val, reduce_only=False)
+                order = hyperliquid_trading_client.build_ioc_order(coin=coin_key or coin, is_buy=is_buy, sz=sz, px=px_val, reduce_only=False)
             except Exception as exc:
                 sess.errors.append(f"build order error: {exc}")
                 continue

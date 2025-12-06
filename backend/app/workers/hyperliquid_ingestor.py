@@ -172,13 +172,20 @@ class HyperliquidIngestor:
             fills = []
             self._record_backoff(whale.address, exc)
 
-        # Preload existing tx hashes once to avoid per-fill queries.
-        existing_hashes = set(
-            h[0]
-            for h in session.query(Trade.tx_hash)
-            .filter(Trade.whale_id == whale.id, Trade.tx_hash.isnot(None))
-            .all()
-        )
+        existing_hashes: set[str] = set()
+        if checkpoint.last_fill_time:
+            cutoff_dt = datetime.fromtimestamp(checkpoint.last_fill_time / 1000, tz=timezone.utc)
+            existing_hashes = {
+                h[0]
+                for h in session.query(Trade.tx_hash)
+                .filter(
+                    Trade.whale_id == whale.id,
+                    Trade.tx_hash.isnot(None),
+                    Trade.timestamp >= cutoff_dt,
+                )
+                .all()
+                if h[0] is not None
+            }
         new_fills = [
             f for f in fills if checkpoint.last_fill_time is None or (f.get("time") or 0) > checkpoint.last_fill_time
         ]
@@ -198,7 +205,8 @@ class HyperliquidIngestor:
                 timestamp = datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone.utc) if ts_ms else now
                 sz = fill.get("sz")
                 px = fill.get("px")
-                coin = fill.get("coin") or fill.get("ticker") or "PERP"
+                coin_raw = fill.get("coin") or fill.get("ticker") or "PERP"
+                coin = (coin_raw or "PERP").upper()
                 try:
                     amount_base = float(sz)
                 except Exception:
@@ -209,6 +217,7 @@ class HyperliquidIngestor:
                 except Exception:
                     pass
                 dir_str = str(fill.get("dir") or "").lower()
+                side = str(fill.get("side") or "").lower()
                 if "close" in dir_str and "short" in dir_str:
                     direction = TradeDirection.CLOSE_SHORT
                 elif "close" in dir_str and "long" in dir_str:
@@ -218,7 +227,16 @@ class HyperliquidIngestor:
                 elif "long" in dir_str:
                     direction = TradeDirection.LONG
                 else:
-                    direction = TradeDirection.SHORT if str(fill.get("side") or "").lower() == "a" else TradeDirection.LONG
+                    if side in ("a", "sell", "s"):
+                        direction = TradeDirection.SHORT
+                    else:
+                        direction = TradeDirection.LONG
+                    logger.debug(
+                        "Hyperliquid fill with unrecognized dir=%s, side=%s; defaulting direction=%s",
+                        dir_str,
+                        side,
+                        direction,
+                    )
                 session.add(
                     Trade(
                         whale_id=whale.id,
@@ -305,7 +323,8 @@ class HyperliquidIngestor:
             logger.info("HL ingest positions whale=%s wrote_positions=True", whale.address)
         else:
             logger.debug("HL ingest positions whale=%s no positions written", whale.address)
-        recompute_wallet_metrics(session, whale)
+        if wrote:
+            recompute_wallet_metrics(session, whale)
         # Commit after metrics/holdings updates to keep transactions short.
         self._commit_with_retry(session)
         progress(100.0, "hyperliquid: backfill done")
@@ -329,18 +348,22 @@ class HyperliquidIngestor:
         logger.debug("HL positions whale=%s positions_len=%s", whale.address, len(positions) if positions else 0)
         if not isinstance(positions, list):
             return False
+        existing_holdings = {
+            h.asset_symbol: h for h in session.query(Holding).filter(Holding.whale_id == whale.id).all()
+        }
         cache = self._positions_cache.setdefault(whale.address, {})
         for pos in positions:
             position = pos.get("position") or {}
-            coin = pos.get("coin") or position.get("coin")
+            coin_raw = pos.get("coin") or position.get("coin")
+            coin = (coin_raw or "").upper()
             szi = position.get("szi")
             entry_px = position.get("entryPx")
             mark_px = position.get("markPx") or pos.get("markPx") or entry_px
             funding = position.get("funding") or pos.get("funding")
-            if coin is None or szi in (None, 0):
+            if not coin or szi in (None, 0):
                 continue
             size = float(szi)
-            prev_size, prev_entry = cache.get(coin.upper(), (None, None))  # type: ignore
+            prev_size, prev_entry = cache.get(coin, (None, None))  # type: ignore
             direction = TradeDirection.LONG if size >= 0 else TradeDirection.SHORT
             value_usd = None
             # Prefer reported position value (notional); otherwise mark*size
@@ -356,29 +379,37 @@ class HyperliquidIngestor:
                 except Exception:
                     pass
             changed = prev_size is None or abs(prev_size - size) > 1e-9 or (prev_entry is None and entry_px is not None)
-            cache[coin.upper()] = (size, entry_px if isinstance(entry_px, (int, float)) else prev_entry)
-            holding = (
-                session.query(Holding)
-                .filter(Holding.whale_id == whale.id, Holding.asset_symbol == coin)
-                .one_or_none()
-            )
+            cache[coin] = (size, entry_px if isinstance(entry_px, (int, float)) else prev_entry)
+            if not changed:
+                continue
+            holding = existing_holdings.get(coin)
             if holding:
                 holding.amount = abs(size)
                 holding.value_usd = value_usd
             else:
-                session.add(
-                    Holding(
-                        whale_id=whale.id,
-                        asset_symbol=coin,
-                        asset_name=coin,
-                        chain_id=chain_id,
-                        amount=abs(size),
-                        value_usd=value_usd,
-                        portfolio_percent=None,
-                    )
+                holding = Holding(
+                    whale_id=whale.id,
+                    asset_symbol=coin,
+                    asset_name=coin,
+                    chain_id=chain_id,
+                    amount=abs(size),
+                    value_usd=value_usd,
+                    portfolio_percent=None,
                 )
+                session.add(holding)
+                existing_holdings[coin] = holding
             # Do not emit position snapshots to the live feed; only update holdings/metrics.
-            if changed:
+            wrote = True
+
+        active_coins = {
+            (pos.get("coin") or (pos.get("position") or {}).get("coin") or "").upper()
+            for pos in positions
+            if (pos.get("position") or {}).get("szi") not in (None, 0)
+        }
+        for sym, holding in existing_holdings.items():
+            if sym not in active_coins and holding.amount not in (0, None):
+                holding.amount = 0
+                holding.value_usd = 0
                 wrote = True
         return wrote
 

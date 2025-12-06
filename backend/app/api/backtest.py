@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from bisect import bisect_right
 from decimal import Decimal
 from typing import Iterable, Sequence
 
@@ -119,7 +120,7 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
         }
         entry_dirs = {TradeDirection.LONG, TradeDirection.SHORT, TradeDirection.BUY}
         ignore_dirs = {TradeDirection.DEPOSIT}
-        asset_filter = [sym.upper() for sym in payload.asset_symbols] if payload.asset_symbols else None
+        asset_filter = {sym.upper() for sym in payload.asset_symbols} if payload.asset_symbols else None
 
         trade_query = (
             session.query(Trade)
@@ -131,21 +132,25 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
         if payload.end:
             trade_query = trade_query.filter(Trade.timestamp <= payload.end)
         if asset_filter:
-            trade_query = trade_query.filter(Trade.base_asset.in_(asset_filter))
+            trade_query = trade_query.filter(Trade.base_asset.in_(list(asset_filter)))
         if payload.max_trades is not None:
             trade_query = trade_query.limit(payload.max_trades)
         trades = trade_query.all()
 
-        entry_query = (
-            session.query(Trade.value_usd)
-            .filter(
-                Trade.whale_id == whale.id,
-                Trade.direction.in_(entry_dirs),
-                Trade.value_usd.isnot(None),
-            )
-            .order_by(Trade.timestamp.asc())
+        entry_query = session.query(Trade.value_usd).filter(
+            Trade.whale_id == whale.id,
+            Trade.direction.in_(entry_dirs),
+            Trade.value_usd.isnot(None),
         )
-        entry_sizes = [Decimal(abs(t.value_usd)) for t in entry_query.all() if t.value_usd]
+        if payload.start:
+            entry_query = entry_query.filter(Trade.timestamp >= payload.start)
+        if payload.end:
+            entry_query = entry_query.filter(Trade.timestamp <= payload.end)
+        if asset_filter:
+            entry_query = entry_query.filter(Trade.base_asset.in_(list(asset_filter)))
+
+        entry_query = entry_query.order_by(Trade.timestamp.asc())
+        entry_sizes = [Decimal(abs(v[0])) for v in entry_query.all() if v[0] is not None]
         initial_deposit = Decimal(payload.initial_deposit_usd)
         recommended_pct = _recommended_position_pct(initial_deposit, entry_sizes)
         used_pct = (
@@ -161,9 +166,10 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
         leverage = max(Decimal("0.1"), min(leverage, Decimal("100")))
 
         # preload price history for marking open positions (best-effort)
-        assets = {t.base_asset for t in trades if t.base_asset}
-        assets_used = asset_filter or sorted(assets)
-        price_cache: dict[str, list[tuple[datetime, Decimal]]] = {}
+        assets = {(t.base_asset or "").upper() for t in trades if t.base_asset}
+        assets.discard("")
+        assets_used = sorted(asset_filter) if asset_filter else sorted(assets)
+        price_cache: dict[str, tuple[list[datetime], list[Decimal]]] = {}
 
         # Gracefully return an empty backtest instead of 404 when no trades match filters.
         if not trades:
@@ -199,30 +205,51 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
         start_ts = trades[0].timestamp.replace(second=0, microsecond=0) if trades else None
         end_ts = trades[-1].timestamp.replace(second=0, microsecond=0) if trades else None
 
+        def _has_price_coverage(session, assets: set[str], start_ts: datetime, end_ts: datetime) -> set[str]:
+            if not assets or not start_ts or not end_ts:
+                return set()
+            rows = (
+                session.query(
+                    PriceHistory.asset_symbol,
+                    func.min(PriceHistory.timestamp),
+                    func.max(PriceHistory.timestamp),
+                )
+                .filter(PriceHistory.asset_symbol.in_(list(assets)))
+                .group_by(PriceHistory.asset_symbol)
+                .all()
+            )
+            covered: set[str] = set()
+            for sym, min_ts, max_ts in rows:
+                if min_ts <= start_ts and max_ts >= end_ts:
+                    covered.add(sym)
+            return covered
+
         if assets and start_ts and end_ts:
-            try:
-                # fetch 1m prices for full window (with small buffer) if missing
-                fetch_and_store_binance_prices(
-                    session,
-                    assets=list(assets),
-                    timeframe="1m",
-                    since=start_ts - timedelta(minutes=1),
-                    until=end_ts + timedelta(minutes=1),
-                    limit=1000,
-                )
-                session.flush()
-                _commit_with_retry(session)
-            except OperationalError as exc:
-                session.rollback()
-                logger.warning(
-                    "price preload commit failed; continuing without new prices: %s", exc
-                )
-            except Exception as exc:
-                # SQLite can raise "database is locked" under concurrent writers; reset the session and continue.
-                session.rollback()
-                logger.warning(
-                    "price preload failed; continuing without new prices: %s", exc
-                )
+            if payload.preload_prices:
+                try:
+                    covered = _has_price_coverage(session, assets, start_ts, end_ts)
+                    missing_assets = assets - covered
+                    if missing_assets:
+                        fetch_and_store_binance_prices(
+                            session,
+                            assets=list(missing_assets),
+                            timeframe="1m",
+                            since=start_ts - timedelta(minutes=1),
+                            until=end_ts + timedelta(minutes=1),
+                            limit=1500,
+                        )
+                        session.flush()
+                        _commit_with_retry(session)
+                except OperationalError as exc:
+                    session.rollback()
+                    logger.warning(
+                        "price preload commit failed; continuing without new prices: %s", exc
+                    )
+                except Exception as exc:
+                    session.rollback()
+                    logger.warning(
+                        "price preload failed; continuing without new prices: %s", exc
+                    )
 
             rows = (
                 session.query(PriceHistory.asset_symbol, PriceHistory.timestamp, PriceHistory.price_usd)
@@ -237,7 +264,9 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
             for sym, ts, price in rows:
                 if price is None:
                     continue
-                price_cache.setdefault(sym, []).append((ts, Decimal(price)))
+                ts_list, px_list = price_cache.setdefault(sym, ([], []))
+                ts_list.append(ts)
+                px_list.append(Decimal(price))
 
         def _mark_price(sym: str | None, ts: datetime, fallback: Decimal | None) -> Decimal | None:
             if sym is None:
@@ -245,14 +274,11 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
             series = price_cache.get(sym)
             if not series:
                 return fallback
-            # latest price at or before ts
-            last = None
-            for tstamp, p in series:
-                if tstamp <= ts:
-                    last = p
-                else:
-                    break
-            return last if last is not None else fallback
+            ts_list, px_list = series
+            idx = bisect_right(ts_list, ts) - 1
+            if idx < 0:
+                return fallback
+            return px_list[idx]
 
         positions: dict[str, dict[str, Decimal]] = {}
         cash = initial_deposit
@@ -316,6 +342,12 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
 
         # iterate minute by minute and process trades that occur within or before that minute
         if start_ts and end_ts:
+            delta_minutes = int((end_ts - start_ts).total_seconds() // 60)
+            step_minutes = 1
+            if delta_minutes > 60 * 24 * 60:
+                step_minutes = 5
+            if delta_minutes > 60 * 24 * 180:
+                step_minutes = 15
             ts = start_ts
             while ts <= end_ts:
                 # process trades with timestamp <= end of this minute
@@ -349,11 +381,15 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
                             price = Decimal(abs(t.value_usd)) / Decimal(abs(t.amount_base))
                     except Exception:
                         price = None
-                    price = _mark_price(t.base_asset, t.timestamp, price)
+                    sym_key = (t.base_asset or "").upper() or None
+                    price = _mark_price(sym_key, t.timestamp, price)
                     if price is None or price <= 0:
                         continue
-                    base = t.base_asset or "UNKNOWN"
-                    pos = positions.setdefault(base, {"qty": Decimal(0), "avg_price": Decimal(0), "margin": Decimal(0)})
+                    base_label = t.base_asset or "UNKNOWN"
+                    pos_key = sym_key or base_label
+                    pos = positions.setdefault(
+                        pos_key, {"qty": Decimal(0), "avg_price": Decimal(0), "margin": Decimal(0)}
+                    )
 
                     net_change = Decimal(0)
                     pnl = Decimal(0)
@@ -451,8 +487,8 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
                         )
                     )
 
-                _record_equity(minute_end.replace(second=0, microsecond=0))
-                ts = ts + timedelta(minutes=1)
+                _record_equity(ts.replace(second=0, microsecond=0))
+                ts = ts + timedelta(minutes=step_minutes)
 
         # Ensure at least one equity point if trades existed
         if not equity_curve and trades:
@@ -536,7 +572,7 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
         price_points = None
         if payload.include_price_points:
             price_points = {
-                sym: [{"timestamp": ts, "price": float(p)} for ts, p in series]
+                sym: [{"timestamp": ts, "price": float(p)} for ts, p in zip(series[0], series[1])]
                 for sym, series in price_cache.items()
             }
 

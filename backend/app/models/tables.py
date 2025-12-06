@@ -155,6 +155,7 @@ class Trade(Base):
     __table_args__ = (
         Index("ix_trades_whale_timestamp", "whale_id", "timestamp"),
         Index("ix_trades_chain_timestamp", "chain_id", "timestamp"),
+        UniqueConstraint("whale_id", "tx_hash", name="uq_trades_whale_tx_hash"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -192,7 +193,10 @@ class Event(Base):
 
 class PriceHistory(Base):
     __tablename__ = "price_history"
-    __table_args__ = (Index("ix_price_history_asset_ts", "asset_symbol", "timestamp"),)
+    __table_args__ = (
+        Index("ix_price_history_asset_ts", "asset_symbol", "timestamp"),
+        UniqueConstraint("asset_symbol", "timestamp", name="uq_price_history_asset_ts"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     asset_symbol = Column(String(64), nullable=False)
