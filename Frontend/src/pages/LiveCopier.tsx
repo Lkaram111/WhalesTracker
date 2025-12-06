@@ -291,7 +291,7 @@ export default function LiveCopier() {
                         {r.position_size_pct != null ? `${r.position_size_pct.toFixed(1)}% size` : 'auto size'}
                       </div>
                       <div className="mt-2 text-xs text-muted-foreground space-y-1">
-                        <div>Leverage: {r.leverage ? `${r.leverage.toFixed(2)}x` : 'n/a'}</div>
+                        <div>Leverage: {r.leverage != null ? `${r.leverage.toFixed(2)}x` : 'auto'}</div>
                         <div>Win rate: {r.win_rate_percent != null ? formatPercent(r.win_rate_percent) : 'n/a'}</div>
                         <div>Trades: {r.trades_copied ?? 'n/a'}</div>
                         <div>Max DD: {r.max_drawdown_percent != null ? formatPercent(r.max_drawdown_percent) : 'n/a'}</div>

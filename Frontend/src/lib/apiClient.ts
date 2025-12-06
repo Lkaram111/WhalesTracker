@@ -162,11 +162,13 @@ export const api = {
     position_size_pct?: number | null;
     fee_bps?: number;
     slippage_bps?: number;
+    leverage?: number | null;
     start?: string;
     end?: string;
     max_trades?: number;
     asset_symbols?: string[];
     include_price_points?: boolean;
+    preload_prices?: boolean;
     trades_limit?: number;
     trades_offset?: number;
   }) => apiPost<import('@/types/api').CopierBacktestResponse>('/api/v1/backtest/copier', body),
@@ -194,6 +196,7 @@ export const api = {
     run_id: number;
     execute?: boolean;
     position_size_pct?: number | null;
+    leverage?: number | null;
   }) =>
     apiPost<import('@/types/api').CopierSessionStatus>('/api/v1/backtest/live/start', body),
   listActiveCopierSessions: (chain: string, address: string) =>

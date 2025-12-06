@@ -11,7 +11,7 @@ from sqlalchemy import func, select, inspect
 from sqlalchemy.exc import OperationalError
 
 from app.db.session import SessionLocal
-from app.models import BacktestRun, Chain, PriceHistory, Trade, TradeDirection, Whale
+from app.models import BacktestRun, Chain, CurrentWalletMetrics, PriceHistory, Trade, TradeDirection, Whale
 from app.core.config import settings
 from app.schemas.api import (
     BacktestSummary,
@@ -44,12 +44,13 @@ def _simulate_copy_trades(
     used_pct: float,
     fee_rate: Decimal,
     slippage_rate: Decimal,
-    leverage: Decimal,
+    leverage: Decimal | None,
     include_price_points: bool,
     preload_prices: bool,
     asset_filter: set[str] | None,
     trades_limit: int,
     trades_offset: int,
+    whale_portfolio_value: Decimal | None = None,
 ) -> tuple[BacktestSummary, list[BacktestTradeResult], list[dict], dict[str, list[dict]] | None, int]:
     closing_dirs = {
         TradeDirection.CLOSE_LONG,
@@ -136,6 +137,14 @@ def _simulate_copy_trades(
             return fallback
         return px_list[idx]
 
+    def _derive_trade_leverage(trade_notional: Decimal) -> Decimal:
+        if leverage is not None and leverage > 0:
+            return leverage
+        if whale_portfolio_value is not None and whale_portfolio_value > 0 and trade_notional > 0:
+            derived = trade_notional / whale_portfolio_value
+            return max(Decimal("0.1"), min(derived, Decimal("100")))
+        return Decimal(1)
+
     positions: dict[str, dict[str, Decimal]] = {}
     cash = initial_deposit
     cumulative_net = Decimal(0)
@@ -146,6 +155,7 @@ def _simulate_copy_trades(
     closing_count = 0
     results: list[BacktestTradeResult] = []
     equity_curve: list[dict] = []
+    used_leverages: list[Decimal] = []
 
     def _compute_drawdown(curve: list[dict]) -> tuple[Decimal, Decimal]:
         if not curve:
@@ -214,6 +224,8 @@ def _simulate_copy_trades(
                 direction = direction_raw if hasattr(direction_raw, "value") else TradeDirection(str(direction_raw))
                 notional = Decimal(abs(getattr(t, "value_usd", 0) or 0))
                 scale = Decimal(used_pct)
+                trade_leverage = _derive_trade_leverage(notional)
+                used_leverages.append(trade_leverage)
                 current_unreal, current_margin = _unrealized_and_margin(t.timestamp)
                 equity_now = cash + current_margin + current_unreal
                 desired_notional = notional * scale
@@ -221,7 +233,7 @@ def _simulate_copy_trades(
                 if direction in closing_dirs:
                     user_notional = desired_notional
                 else:
-                    max_notional_overall = equity_now * leverage
+                    max_notional_overall = equity_now * trade_leverage
                     max_notional_per_trade = max_notional_overall * per_trade_cap_ratio
                     user_notional = min(desired_notional, max_notional_per_trade) if max_notional_overall > 0 else Decimal(0)
                 if user_notional <= 0:
@@ -252,14 +264,15 @@ def _simulate_copy_trades(
                 if direction in entry_dirs:
                     fee = user_notional * fee_rate
                     slip = user_notional * slippage_rate
-                    margin_required = user_notional / leverage
+                    eff_leverage = trade_leverage if trade_leverage > 0 else Decimal(1)
+                    margin_required = user_notional / eff_leverage
                     total_cost = margin_required + fee + slip
                     if total_cost > cash:
                         afford_scale = cash / total_cost if total_cost > 0 else Decimal(0)
                         user_notional *= afford_scale
                         fee = user_notional * fee_rate
                         slip = user_notional * slippage_rate
-                        margin_required = user_notional / leverage
+                        margin_required = user_notional / eff_leverage
                         total_cost = margin_required + fee + slip
                         if user_notional <= 0 or total_cost > cash:
                             continue
@@ -348,12 +361,19 @@ def _simulate_copy_trades(
     win_rate = float(wins) / float(closing_count) * 100 if closing_count > 0 else None
     max_drawdown_percent = float(max_dd_ratio * Decimal(100)) if max_dd_ratio is not None else None
     max_drawdown_usd = float(max_dd_usd) if max_dd_usd is not None else None
+    leverage_used = (
+        float(leverage)
+        if leverage is not None
+        else float(sum(used_leverages) / len(used_leverages))
+        if used_leverages
+        else None
+    )
 
     summary = BacktestSummary(
         initial_deposit_usd=float(initial_deposit),
         recommended_position_pct=recommended_pct * 100.0,
         used_position_pct=used_pct * 100.0,
-        leverage_used=float(leverage),
+        leverage_used=leverage_used,
         asset_symbols=assets_used,
         total_fees_usd=float(total_fees),
         total_slippage_usd=float(total_slippage),
@@ -442,6 +462,28 @@ def _resolve_whale(session, chain: ChainId, address: str) -> tuple[Whale, Chain]
     return whale, chain_obj
 
 
+def _current_portfolio_value(session, whale_id: str) -> Decimal | None:
+    """Return the latest cached portfolio value for a whale, if available."""
+    metrics = session.get(CurrentWalletMetrics, whale_id)
+    if not metrics or metrics.portfolio_value_usd is None:
+        return None
+    try:
+        return Decimal(metrics.portfolio_value_usd)
+    except Exception:
+        return None
+
+
+def _auto_position_pct_by_wallet(initial_deposit: Decimal, whale_portfolio_value: Decimal | None) -> float | None:
+    """Derive an auto position size as a percent of whale trade size based on wallet sizes."""
+    if whale_portfolio_value is None or whale_portfolio_value <= 0:
+        return None
+    try:
+        pct = float((initial_deposit / whale_portfolio_value) * Decimal(100))
+    except Exception:
+        return None
+    return max(0.0, min(pct, 200.0))
+
+
 def _recommended_position_pct(initial_deposit: Decimal, entry_sizes: Iterable[Decimal]) -> float:
     """Suggest copy size as ratio of user capital to whale's typical trade size."""
     vals = [v for v in entry_sizes if v > 0]
@@ -503,7 +545,14 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
         entry_query = entry_query.order_by(Trade.timestamp.asc())
         entry_sizes = [Decimal(abs(v[0])) for v in entry_query.all() if v[0] is not None]
         initial_deposit = Decimal(payload.initial_deposit_usd)
-        recommended_pct = _recommended_position_pct(initial_deposit, entry_sizes)
+        whale_portfolio_value = _current_portfolio_value(session, whale.id)
+        auto_pct = _auto_position_pct_by_wallet(initial_deposit, whale_portfolio_value)
+        recommended_pct = (
+            auto_pct / 100.0
+            if auto_pct is not None
+            else _recommended_position_pct(initial_deposit, entry_sizes)
+        )
+        recommended_pct = max(0.0, min(recommended_pct, 2.0))
         used_pct = (
             float(payload.position_size_pct) / 100.0
             if payload.position_size_pct is not None
@@ -513,8 +562,10 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
 
         fee_rate = Decimal(payload.fee_bps) / Decimal(10_000)
         slippage_rate = Decimal(payload.slippage_bps) / Decimal(10_000)
-        leverage = Decimal(payload.leverage or 1.0)
-        leverage = max(Decimal("0.1"), min(leverage, Decimal("100")))
+        leverage = None
+        if payload.leverage is not None:
+            leverage = Decimal(payload.leverage)
+            leverage = max(Decimal("0.1"), min(leverage, Decimal("100")))
 
         # preload price history for marking open positions (best-effort)
         assets = {(t.base_asset or "").upper() for t in trades if t.base_asset}
@@ -528,7 +579,7 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
                 initial_deposit_usd=float(initial_deposit),
                 recommended_position_pct=recommended_pct * 100.0,
                 used_position_pct=used_pct * 100.0,
-                leverage_used=float(leverage),
+                leverage_used=float(leverage) if leverage is not None else None,
                 asset_symbols=assets_used,
                 total_fees_usd=0.0,
                 total_slippage_usd=0.0,
@@ -537,11 +588,11 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
                 roi_percent=0.0,
                 trades_copied=0,
                 win_rate_percent=None,
-            max_drawdown_percent=0.0,
-            max_drawdown_usd=0.0,
-            start=None,
-            end=None,
-        )
+                max_drawdown_percent=0.0,
+                max_drawdown_usd=0.0,
+                start=None,
+                end=None,
+            )
             return CopierBacktestResponse(
                 summary=empty_summary,
                 trades=[],
@@ -631,6 +682,14 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
                 return fallback
             return px_list[idx]
 
+        def _derive_trade_leverage(trade_notional: Decimal) -> Decimal:
+            if leverage is not None and leverage > 0:
+                return leverage
+            if whale_portfolio_value is not None and whale_portfolio_value > 0 and trade_notional > 0:
+                derived = trade_notional / whale_portfolio_value
+                return max(Decimal("0.1"), min(derived, Decimal("100")))
+            return Decimal(1)
+
         positions: dict[str, dict[str, Decimal]] = {}
         cash = initial_deposit
         cumulative_net = Decimal(0)
@@ -641,6 +700,7 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
         closing_count = 0
         results: list[BacktestTradeResult] = []
         equity_curve: list[dict] = []
+        used_leverages: list[Decimal] = []
 
         def _compute_drawdown(curve: list[dict]) -> tuple[Decimal, Decimal]:
             if not curve:
@@ -710,6 +770,8 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
                     direction = t.direction if hasattr(t.direction, "value") else TradeDirection(str(t.direction))
                     notional = Decimal(abs(t.value_usd or 0))
                     scale = Decimal(used_pct)
+                    trade_leverage = _derive_trade_leverage(notional)
+                    used_leverages.append(trade_leverage)
                     current_unreal, current_margin = _unrealized_and_margin(t.timestamp)
                     equity_now = cash + current_margin + current_unreal
                     desired_notional = notional * scale
@@ -719,7 +781,7 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
                         user_notional = desired_notional
                     else:
                         # Cap exposure by available equity * leverage to avoid oversizing; also per-trade cap to preserve dry powder
-                        max_notional_overall = equity_now * leverage
+                        max_notional_overall = equity_now * trade_leverage
                         max_notional_per_trade = max_notional_overall * per_trade_cap_ratio
                         user_notional = (
                             min(desired_notional, max_notional_per_trade) if max_notional_overall > 0 else Decimal(0)
@@ -752,14 +814,15 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
                         fee = user_notional * fee_rate
                         slip = user_notional * slippage_rate
                         # adjust size if we can't afford margin + costs
-                        margin_required = user_notional / leverage
+                        eff_leverage = trade_leverage if trade_leverage > 0 else Decimal(1)
+                        margin_required = user_notional / eff_leverage
                         total_cost = margin_required + fee + slip
                         if total_cost > cash:
                             afford_scale = cash / total_cost if total_cost > 0 else Decimal(0)
                             user_notional *= afford_scale
                             fee = user_notional * fee_rate
                             slip = user_notional * slippage_rate
-                            margin_required = user_notional / leverage
+                            margin_required = user_notional / eff_leverage
                             total_cost = margin_required + fee + slip
                             if user_notional <= 0 or total_cost > cash:
                                 continue
@@ -850,12 +913,19 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
         win_rate = float(wins) / float(closing_count) * 100 if closing_count > 0 else None
         max_drawdown_percent = float(max_dd_ratio * Decimal(100)) if max_dd_ratio is not None else None
         max_drawdown_usd = float(max_dd_usd) if max_dd_usd is not None else None
+        leverage_used = (
+            float(leverage)
+            if leverage is not None
+            else float(sum(used_leverages) / len(used_leverages))
+            if used_leverages
+            else None
+        )
 
         summary = BacktestSummary(
             initial_deposit_usd=float(initial_deposit),
             recommended_position_pct=recommended_pct * 100.0,
             used_position_pct=used_pct * 100.0,
-            leverage_used=float(leverage),
+            leverage_used=leverage_used,
             asset_symbols=assets_used,
             total_fees_usd=float(total_fees),
             total_slippage_usd=float(total_slippage),
@@ -879,7 +949,7 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
         run_record = BacktestRun(
             whale_id=whale.id,
             leverage=leverage,
-            position_size_pct=summary.used_position_pct,
+            position_size_pct=payload.position_size_pct,
             asset_symbols=assets_used,
             win_rate_percent=win_rate,
             trades_copied=len(results),
@@ -985,8 +1055,10 @@ def run_multi_whale_backtest(payload: MultiWhaleBacktestRequest) -> MultiWhaleBa
         recommended_pct = used_pct
         fee_rate = Decimal(payload.fee_bps) / Decimal(10_000)
         slippage_rate = Decimal(payload.slippage_bps) / Decimal(10_000)
-        leverage = Decimal(payload.leverage or 1.0)
-        leverage = max(Decimal("0.1"), min(leverage, Decimal("100")))
+        leverage = None
+        if payload.leverage is not None:
+            leverage = Decimal(payload.leverage)
+            leverage = max(Decimal("0.1"), min(leverage, Decimal("100")))
 
         window = timedelta(minutes=payload.align_window_minutes)
         entries = [
@@ -1063,7 +1135,7 @@ def run_multi_whale_backtest(payload: MultiWhaleBacktestRequest) -> MultiWhaleBa
                 initial_deposit_usd=float(initial_deposit),
                 recommended_position_pct=recommended_pct * 100.0,
                 used_position_pct=used_pct * 100.0,
-                leverage_used=float(leverage),
+                leverage_used=float(leverage) if leverage is not None else None,
                 asset_symbols=sorted(asset_filter) if asset_filter else [],
                 total_fees_usd=0.0,
                 total_slippage_usd=0.0,
@@ -1207,12 +1279,19 @@ def start_copier_session(payload: StartCopierRequest) -> CopierSessionStatus:
             raise HTTPException(status_code=404, detail="Backtest run not found for whale")
         if payload.execute and (not settings.hyperliquid_private_key or not settings.hyperliquid_address):
             raise HTTPException(status_code=400, detail="Hyperliquid execution keys not configured")
+        whale_value = _current_portfolio_value(session, whale.id)
+        try:
+            whale_value_float = float(whale_value) if whale_value is not None else None
+        except Exception:
+            whale_value_float = None
         copier_manager.start()
         sess = copier_manager.create_session(
             whale=whale,
             run=run,
             execute=payload.execute,
             position_size_pct=payload.position_size_pct,
+            leverage=float(payload.leverage) if payload.leverage is not None else None,
+            whale_account_value_usd=whale_value_float,
         )
         return CopierSessionStatus(
             session_id=sess.id,

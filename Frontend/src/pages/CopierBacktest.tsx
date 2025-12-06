@@ -27,7 +27,7 @@ export default function CopierBacktest() {
   const [positionPct, setPositionPct] = useState<number | null>(null);
   const [feeBps, setFeeBps] = useState(5);
   const [slippageBps, setSlippageBps] = useState(5);
-  const [leverage, setLeverage] = useState(1);
+  const [leverage, setLeverage] = useState<number | null>(null);
   const [start, setStart] = useState<string>('');
   const [end, setEnd] = useState<string>('');
   const [includePrices, setIncludePrices] = useState(false);
@@ -59,10 +59,10 @@ export default function CopierBacktest() {
         initial_deposit_usd: initialDeposit,
         fee_bps: feeBps,
         slippage_bps: slippageBps,
-        leverage,
       };
       if (selectedAssets.length > 0) payload.asset_symbols = selectedAssets;
       if (positionPct !== null) payload.position_size_pct = positionPct;
+      if (leverage !== null) payload.leverage = leverage;
       if (start) payload.start = new Date(start).toISOString();
       if (end) payload.end = new Date(end).toISOString();
       if (includePrices) payload.include_price_points = true;
@@ -153,11 +153,11 @@ export default function CopierBacktest() {
         initial_deposit_usd: initialDeposit,
         fee_bps: feeBps,
         slippage_bps: slippageBps,
-        leverage,
         preload_prices: preloadPrices,
       };
       if (selectedAssets.length > 0) payload.asset_symbols = selectedAssets;
       if (positionPct !== null) payload.position_size_pct = positionPct;
+      if (leverage !== null) payload.leverage = leverage;
       if (start) payload.start = new Date(start).toISOString();
       if (end) payload.end = new Date(end).toISOString();
       if (includePrices) payload.include_price_points = true;
@@ -439,16 +439,20 @@ export default function CopierBacktest() {
 
             <div>
               <label className="text-xs text-muted-foreground uppercase tracking-wider mb-2 block">
-                Leverage (x)
+                Leverage (x, optional)
               </label>
               <input
                 type="number"
                 min={0.1}
                 max={100}
                 step={0.1}
-                value={leverage}
-                onChange={(e) => setLeverage(Number(e.target.value))}
-                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+                value={leverage ?? ''}
+                onChange={(e) => {
+                  const v = e.target.value === '' ? null : Number(e.target.value);
+                  setLeverage(v);
+                }}
+                placeholder="auto (mirror whale leverage)"
+                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
               />
             </div>
 
@@ -589,7 +593,7 @@ export default function CopierBacktest() {
                   value={
                     result.summary.leverage_used != null
                       ? `${result.summary.leverage_used.toFixed(2)}x`
-                      : 'N/A'
+                      : 'Auto'
                   }
                 />
                 <SummaryTile label="Trades Copied" value={String(result.summary.trades_copied)} />

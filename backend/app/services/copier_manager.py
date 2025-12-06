@@ -17,7 +17,7 @@ class CopierSession:
     id: int
     whale_id: str
     address: str
-    leverage: float
+    leverage: float | None
     position_size_pct: float | None
     asset_symbols: list[str] | None
     asset_symbols_upper: set[str] = field(default_factory=set)
@@ -29,6 +29,12 @@ class CopierSession:
     processed: int = 0
     execute: bool = False
     is_cross: bool = True
+    position_size_auto: bool = False
+    leverage_auto: bool = False
+    user_deposit_usd: float | None = None
+    whale_account_value_usd: float | None = None
+    last_computed_position_pct: float | None = None
+    last_leverage_used: float | None = None
 
 
 class CopierManager:
@@ -58,6 +64,9 @@ class CopierManager:
         run: BacktestRun,
         execute: bool = False,
         position_size_pct: float | None = None,
+        leverage: float | None = None,
+        user_deposit_usd: float | None = None,
+        whale_account_value_usd: float | None = None,
     ) -> CopierSession:
         # Seed the cursor to the latest known fill so we don't replay historical trades
         latest_ts: int | None = None
@@ -89,6 +98,34 @@ class CopierManager:
             initial_positions = {}
         symbols = run.asset_symbols or []
         asset_symbols_upper = {s.upper() for s in symbols}
+        leverage_override = (
+            float(leverage)
+            if leverage is not None
+            else float(run.leverage)
+            if run.leverage is not None
+            else None
+        )
+        position_override = (
+            float(position_size_pct)
+            if position_size_pct is not None
+            else float(run.position_size_pct)
+            if run.position_size_pct is not None
+            else None
+        )
+        try:
+            deposit_val = (
+                float(user_deposit_usd)
+                if user_deposit_usd is not None
+                else float(run.initial_deposit_usd)
+                if run.initial_deposit_usd is not None
+                else None
+            )
+        except Exception:
+            deposit_val = None
+        try:
+            account_value = float(whale_account_value_usd) if whale_account_value_usd is not None else None
+        except Exception:
+            account_value = None
         with self._lock:
             session_id = self._next_id
             self._next_id += 1
@@ -96,18 +133,18 @@ class CopierManager:
                 id=session_id,
                 whale_id=whale.id,
                 address=whale.address,
-                leverage=float(run.leverage or 1.0),
-                position_size_pct=(
-                    float(position_size_pct)
-                    if position_size_pct is not None
-                    else float(run.position_size_pct) if run.position_size_pct is not None else None
-                ),
+                leverage=leverage_override,
+                position_size_pct=position_override,
                 asset_symbols=symbols or None,
                 asset_symbols_upper=asset_symbols_upper,
                 last_seen_fill=latest_ts,
                 execute=execute,
                 is_cross=True,
                 initial_positions=initial_positions,
+                position_size_auto=position_override is None,
+                leverage_auto=leverage_override is None,
+                user_deposit_usd=deposit_val,
+                whale_account_value_usd=account_value,
             )
             if latest_ts is not None:
                 sess.notifications.append(f"Skipping historical fills up to {latest_ts}")
@@ -162,6 +199,24 @@ class CopierManager:
             return
         if not fills:
             return
+        account_value = sess.whale_account_value_usd
+        if sess.position_size_auto or sess.leverage_auto:
+            try:
+                state = hyperliquid_client.get_clearinghouse_state(sess.address, use_cache=True, ttl=5.0) or {}
+                margin_summary = state.get("marginSummary") or {}
+                acct_val_raw = margin_summary.get("accountValue") or (state.get("crossMarginSummary") or {}).get(
+                    "accountValue"
+                )
+                if acct_val_raw is not None:
+                    try:
+                        account_value = float(acct_val_raw)
+                        sess.whale_account_value_usd = account_value
+                    except Exception:
+                        account_value = account_value
+            except Exception as exc:
+                msg = f"account value error: {exc}"
+                if not sess.errors or sess.errors[-1] != msg:
+                    sess.errors.append(msg)
         for fill in fills:
             ts = fill.get("time") or fill.get("timestamp")
             if ts is None:
@@ -189,6 +244,7 @@ class CopierManager:
                 px_val = None
             if sz <= 0 or not coin or px_val is None:
                 continue
+            whale_sz = sz
             # If we started while whale already had an open position, skip closes until that position is cleared.
             if coin_key and coin_key in sess.initial_positions and sess.initial_positions[coin_key] != 0:
                 signed_sz = sz if is_buy else -sz
@@ -202,12 +258,38 @@ class CopierManager:
                     )
                     continue
             # apply position scaling if provided (percent of whale size)
-            if sess.position_size_pct is not None:
-                sz = sz * (sess.position_size_pct / 100.0)
-            throttle_key = f"{sess.id}:{coin_key or coin}"
-            if sess.execute and sess.leverage and sess.leverage > 0 and self._leverage_throttle.can_run(throttle_key):
+            scale_pct = sess.position_size_pct
+            if sess.position_size_auto and sess.user_deposit_usd not in (None, 0) and account_value not in (None, 0):
                 try:
-                    hyperliquid_trading_client.update_leverage(coin_key or coin, sess.leverage, is_cross=sess.is_cross)
+                    auto_pct = (float(sess.user_deposit_usd) / float(account_value)) * 100.0
+                    auto_pct = max(0.0, min(auto_pct, 200.0))
+                    scale_pct = auto_pct
+                    sess.last_computed_position_pct = auto_pct
+                except Exception:
+                    scale_pct = scale_pct
+            if scale_pct is not None:
+                sz = sz * (scale_pct / 100.0)
+            effective_leverage = sess.leverage
+            if sess.leverage_auto and account_value not in (None, 0):
+                try:
+                    notional_usd = abs(whale_sz * px_val)
+                    eff = notional_usd / float(account_value) if account_value else None
+                    if eff is not None:
+                        effective_leverage = max(0.1, min(eff, 100.0))
+                except Exception:
+                    effective_leverage = effective_leverage
+            sess.last_leverage_used = effective_leverage
+            throttle_key = f"{sess.id}:{coin_key or coin}"
+            if (
+                sess.execute
+                and effective_leverage
+                and effective_leverage > 0
+                and self._leverage_throttle.can_run(throttle_key)
+            ):
+                try:
+                    hyperliquid_trading_client.update_leverage(
+                        coin_key or coin, effective_leverage, is_cross=sess.is_cross
+                    )
                     self._leverage_throttle.touch(throttle_key)
                 except Exception as exc:
                     # log but continue; some endpoints reject leverage update when already set

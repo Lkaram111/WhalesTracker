@@ -197,15 +197,18 @@ class CopierBacktestRequest(BaseModel):
     address: str
     initial_deposit_usd: float = Field(gt=0, description="Starting capital for the backtest")
     position_size_pct: float | None = Field(
-        default=None, ge=0, le=200, description="Optional override: % of whale size to copy"
+        default=None,
+        ge=0,
+        le=200,
+        description="Optional override: % of whale size to copy; omit for auto (based on wallet sizes)",
     )
     fee_bps: float = Field(default=5.0, ge=0, le=1000, description="Per-trade fee in bps")
     slippage_bps: float = Field(default=5.0, ge=0, le=1000, description="Per-trade slippage in bps")
     leverage: float | None = Field(
-        default=1.0,
+        default=None,
         ge=0.1,
         le=100.0,
-        description="Leverage multiplier applied to position notional",
+        description="Optional override: leverage multiplier applied to position notional; omit to mirror whale",
     )
     start: datetime | None = Field(default=None, description="Optional start time filter")
     end: datetime | None = Field(default=None, description="Optional end time filter")
@@ -311,6 +314,12 @@ class StartCopierRequest(BaseModel):
     position_size_pct: float | None = Field(
         default=None, ge=0, le=200, description="Override position size percent; defaults to backtest value"
     )
+    leverage: float | None = Field(
+        default=None,
+        ge=0.1,
+        le=100.0,
+        description="Optional override: leverage to use for live copy; omit to mirror whale/backtest setting",
+    )
 
 
 class CopierSessionStatus(BaseModel):
@@ -342,10 +351,10 @@ class MultiWhaleBacktestRequest(BaseModel):
     fee_bps: float = Field(default=5.0, ge=0, le=1000, description="Per-trade fee in bps")
     slippage_bps: float = Field(default=5.0, ge=0, le=1000, description="Per-trade slippage in bps")
     leverage: float | None = Field(
-        default=1.0,
+        default=None,
         ge=0.1,
         le=100.0,
-        description="Leverage multiplier applied to position notional",
+        description="Optional override: leverage multiplier applied to position notional; omit to mirror whales",
     )
     start: datetime | None = Field(default=None, description="Optional start time filter")
     end: datetime | None = Field(default=None, description="Optional end time filter")

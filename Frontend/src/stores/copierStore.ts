@@ -15,6 +15,7 @@ export type CopierInstance = {
   address: string;
   runId: number;
   positionSizePct?: number | null;
+  leverage?: number | null;
   execute: boolean;
   label?: string | null;
   active: boolean;
@@ -32,6 +33,7 @@ interface CopierState {
     address: string;
     runId: number;
     positionSizePct?: number | null;
+    leverage?: number | null;
     execute?: boolean;
     label?: string | null;
   }) => Promise<CopierInstance>;
@@ -69,13 +71,14 @@ export const useCopierStore = create<CopierState>()(
     (set, get) => ({
       copiers: {},
       isPolling: false,
-      async startCopier({ chain, address, runId, positionSizePct, execute = false, label = null }) {
+      async startCopier({ chain, address, runId, positionSizePct, leverage, execute = false, label = null }) {
         const res = await api.startCopierSession({
           chain,
           address,
           run_id: runId,
           execute,
           position_size_pct: positionSizePct,
+          leverage,
         });
         const next: CopierInstance = {
           sessionId: res.session_id,
@@ -83,6 +86,7 @@ export const useCopierStore = create<CopierState>()(
           address,
           runId,
           positionSizePct,
+          leverage,
           execute,
           label,
           active: res.active,
