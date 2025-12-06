@@ -1,5 +1,6 @@
-﻿import threading
+import threading
 import time
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
@@ -7,6 +8,8 @@ from app.models import BacktestRun, Whale
 from app.services.hyperliquid_client import hyperliquid_client
 from app.services.hyperliquid_trading import hyperliquid_trading_client
 from app.services.throttle import Throttle
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -17,6 +20,7 @@ class CopierSession:
     leverage: float
     position_size_pct: float | None
     asset_symbols: list[str] | None
+    asset_symbols_upper: set[str] = field(default_factory=set)
     last_seen_fill: int | None = None
     active: bool = True
     errors: list[str] = field(default_factory=list)
@@ -83,6 +87,8 @@ class CopierManager:
         except Exception as exc:  # noqa: PERF203
             # Don't block session creation if history fetch fails
             initial_positions = {}
+        symbols = run.asset_symbols or []
+        asset_symbols_upper = {s.upper() for s in symbols}
         with self._lock:
             session_id = self._next_id
             self._next_id += 1
@@ -96,7 +102,8 @@ class CopierManager:
                     if position_size_pct is not None
                     else float(run.position_size_pct) if run.position_size_pct is not None else None
                 ),
-                asset_symbols=run.asset_symbols or None,
+                asset_symbols=symbols or None,
+                asset_symbols_upper=asset_symbols_upper,
                 last_seen_fill=latest_ts,
                 execute=execute,
                 is_cross=True,
@@ -105,7 +112,9 @@ class CopierManager:
             if latest_ts is not None:
                 sess.notifications.append(f"Skipping historical fills up to {latest_ts}")
             if initial_positions:
-                sess.notifications.append(f"Detected pre-session open positions: {', '.join(sorted(initial_positions.keys()))}")
+                sess.notifications.append(
+                    f"Detected pre-session open positions: {', '.join(sorted(initial_positions.keys()))}"
+                )
             self._sessions[session_id] = sess
             return sess
 
@@ -130,8 +139,8 @@ class CopierManager:
         while self._running:
             try:
                 self._tick()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: PERF203
+                logger.exception("Copier tick failed: %s", exc)
             time.sleep(self.poll_interval)
 
     def _tick(self) -> None:
@@ -144,16 +153,17 @@ class CopierManager:
 
     def _process_session(self, sess: CopierSession) -> None:
         start_time = sess.last_seen_fill
-        allowed_assets = {a.upper() for a in sess.asset_symbols} if sess.asset_symbols else None
         try:
-            fills = hyperliquid_client.get_user_fills(sess.address, start_time=start_time)
+            fills = hyperliquid_client.get_user_fills_paginated(
+                sess.address, start_time=start_time, max_pages=1
+            )
         except Exception as exc:  # noqa: PERF203
             sess.errors.append(str(exc))
             return
         if not fills:
             return
         for fill in fills:
-            ts = fill.get('time') or fill.get('timestamp')
+            ts = fill.get("time") or fill.get("timestamp")
             if ts is None:
                 continue
             try:
@@ -163,13 +173,16 @@ class CopierManager:
             if ts_int is not None:
                 if sess.last_seen_fill is None or ts_int > sess.last_seen_fill:
                     sess.last_seen_fill = ts_int
-            coin = fill.get('coin') or fill.get('asset')
+            coin = fill.get("coin") or fill.get("asset")
             coin_key = coin.upper() if coin else None
-            if allowed_assets and (not coin_key or coin_key not in allowed_assets):
+            if sess.asset_symbols_upper and (not coin_key or coin_key not in sess.asset_symbols_upper):
                 continue
-            is_buy = True if fill.get('side') in ('B', 'BUY', 'buy') else False
-            sz = float(fill.get('sz') or fill.get('size') or fill.get('qty') or 0)
-            px = fill.get('px') or fill.get('price')
+            is_buy = True if fill.get("side") in ("B", "BUY", "buy") else False
+            try:
+                sz = float(fill.get("sz") or fill.get("size") or fill.get("qty") or 0)
+            except Exception:
+                sz = 0.0
+            px = fill.get("px") or fill.get("price")
             try:
                 px_val = float(px) if px is not None else None
             except Exception:
@@ -191,20 +204,18 @@ class CopierManager:
             # apply position scaling if provided (percent of whale size)
             if sess.position_size_pct is not None:
                 sz = sz * (sess.position_size_pct / 100.0)
-            if (
-                sess.execute
-                and sess.leverage
-                and sess.leverage > 0
-                and self._leverage_throttle.can_run(f"{sess.id}:{coin}")
-            ):
+            throttle_key = f"{sess.id}:{coin_key or coin}"
+            if sess.execute and sess.leverage and sess.leverage > 0 and self._leverage_throttle.can_run(throttle_key):
                 try:
                     hyperliquid_trading_client.update_leverage(coin_key or coin, sess.leverage, is_cross=sess.is_cross)
-                    self._leverage_throttle.touch(f"{sess.id}:{coin}")
+                    self._leverage_throttle.touch(throttle_key)
                 except Exception as exc:
                     # log but continue; some endpoints reject leverage update when already set
                     sess.errors.append(f"leverage error (ignored): {exc}")
             try:
-                order = hyperliquid_trading_client.build_ioc_order(coin=coin_key or coin, is_buy=is_buy, sz=sz, px=px_val, reduce_only=False)
+                order = hyperliquid_trading_client.build_ioc_order(
+                    coin=coin_key or coin, is_buy=is_buy, sz=sz, px=px_val, reduce_only=False
+                )
             except Exception as exc:
                 sess.errors.append(f"build order error: {exc}")
                 continue
