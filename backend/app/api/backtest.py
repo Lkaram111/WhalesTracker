@@ -934,7 +934,7 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
             price_points=price_points,
             trades_total=total_trades,
             trades_limit=trades_limit,
-            trades_offset=start_idx,
+            trades_offset=trades_offset,
         )
 
 

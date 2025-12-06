@@ -27,7 +27,6 @@ from app.services.broadcast import broadcast_manager
 from app.services.hyperliquid_client import hyperliquid_client
 from app.services.metrics_service import touch_last_active
 from app.services.metrics_service import recompute_wallet_metrics
-import logging
 
 logger = logging.getLogger(__name__)
 
