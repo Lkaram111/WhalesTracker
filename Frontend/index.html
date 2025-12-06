@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -21,6 +21,25 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script>
+      (() => {
+        const storageKey = "whale-tracker-ui";
+        try {
+          const stored = localStorage.getItem(storageKey);
+          const parsed = stored ? JSON.parse(stored) : null;
+          const savedTheme = parsed?.state?.theme ?? "dark";
+          const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+          const resolved = savedTheme === "system" ? (mediaQuery.matches ? "dark" : "light") : savedTheme;
+          const root = document.documentElement;
+
+          root.classList.toggle("dark", resolved === "dark");
+          root.dataset.theme = resolved;
+        } catch (_error) {
+          document.documentElement.classList.add("dark");
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
   </head>
 
   <body>
