@@ -941,11 +941,15 @@ def run_copier_backtest(payload: CopierBacktestRequest) -> CopierBacktestRespons
 @router.post("/copier/multi", response_model=MultiWhaleBacktestResponse)
 def run_multi_whale_backtest(payload: MultiWhaleBacktestRequest) -> MultiWhaleBacktestResponse:
     with SessionLocal() as session:
+        if not payload.addresses:
+            raise HTTPException(status_code=400, detail="At least one address is required")
         chain_obj = session.scalar(select(Chain).where(Chain.slug == payload.chain.lower()))
         if not chain_obj:
             raise HTTPException(status_code=404, detail="Chain not found")
 
         addresses_lc = [addr.lower() for addr in payload.addresses]
+        if payload.min_whales > len(addresses_lc):
+            raise HTTPException(status_code=400, detail="min_whales cannot exceed number of addresses")
         whales = (
             session.query(Whale)
             .filter(Whale.chain_id == chain_obj.id)
