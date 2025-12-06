@@ -7,23 +7,40 @@ import { HoldingsDonut } from '@/components/domain/wallet/HoldingsDonut';
 import { TradesTable } from '@/components/domain/wallet/TradesTable';
 import { RoiChart } from '@/components/domain/charts/RoiChart';
 import { PortfolioChart } from '@/components/domain/charts/PortfolioChart';
+import { MetricCard } from '@/components/common/MetricCard';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ArrowLeft, MessageSquare } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { BackfillStatus, ChainId, Trade, WalletDetails, OpenPosition } from '@/types/api';
 import { api } from '@/lib/apiClient';
-import { formatUSDExact } from '@/lib/formatters';
+import { formatUSD, formatUSDExact } from '@/lib/formatters';
 import { Button } from '@/components/ui/button';
 import { aggregateTrades } from '@/lib/tradeGrouping';
+import { MY_HYPERLIQUID_ADDRESS } from '@/config';
 
-export default function WhaleDetail() {
-  const { chain, address } = useParams<{ chain: ChainId; address: string }>();
+interface WhaleDetailProps {
+  chainOverride?: ChainId;
+  addressOverride?: string;
+  hideBackLink?: boolean;
+}
+
+export default function WhaleDetail({
+  chainOverride,
+  addressOverride,
+  hideBackLink = false,
+}: WhaleDetailProps) {
+  const params = useParams<{ chain: ChainId; address: string }>();
+  const chain = chainOverride ?? params.chain;
+  const address = addressOverride ?? params.address;
   const [roiRange, setRoiRange] = useState(30);
   const [portfolioRange, setPortfolioRange] = useState(30);
   const [tradeSource, setTradeSource] = useState<Trade['source'] | 'all'>('all');
   const [tradeDirection, setTradeDirection] = useState<Trade['direction'] | 'all'>('all');
+  const [tradesTimeFilter, setTradesTimeFilter] = useState<'all' | '24h' | '7d'>('all');
 
   const [walletDetails, setWalletDetails] = useState<WalletDetails | null>(null);
+  const [walletError, setWalletError] = useState<string | null>(null);
+  const [autoCreateAttempted, setAutoCreateAttempted] = useState(false);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [tradesNextCursor, setTradesNextCursor] = useState<string | null>(null);
   const [tradesTotal, setTradesTotal] = useState<number | null>(null);
@@ -110,9 +127,23 @@ export default function WhaleDetail() {
     { value: 'hyperliquid', label: 'Hyperliquid' },
     { value: 'exchange_flow', label: 'Exchange Flows' },
   ];
+  const tradeTimeFilters: { value: 'all' | '24h' | '7d'; label: string }[] = [
+    { value: 'all', label: 'All' },
+    { value: '24h', label: '24h' },
+    { value: '7d', label: '7d' },
+  ];
+  const isMyHyperliquidWallet =
+    chain === 'hyperliquid' &&
+    !!MY_HYPERLIQUID_ADDRESS &&
+    address?.toLowerCase() === MY_HYPERLIQUID_ADDRESS.toLowerCase();
+
+  useEffect(() => {
+    setAutoCreateAttempted(false);
+  }, [chain, address]);
 
   useEffect(() => {
     if (!chain || !address) return;
+    setWalletError(null);
     api
       .getWalletDetails(chain, address)
       .then((data) => {
@@ -121,8 +152,43 @@ export default function WhaleDetail() {
           setWhaleId(data.wallet.id);
         }
       })
-      .catch(() => setWalletDetails(null));
-  }, [chain, address, refreshKey]);
+      .catch(async (err: unknown) => {
+        const status = (err as { status?: number })?.status;
+        if (
+          status === 404 &&
+          isMyHyperliquidWallet &&
+          !autoCreateAttempted
+        ) {
+          setAutoCreateAttempted(true);
+          setWalletError('Tracking your Hyperliquid wallet now—fetching data...');
+          try {
+            await api.createWhale({ chain, address, type: 'trader' });
+            setRefreshKey((k) => k + 1);
+            return;
+          } catch (createErr) {
+            const createMessage =
+              createErr instanceof Error
+                ? createErr.message
+                : 'Failed to add your Hyperliquid wallet automatically.';
+            setWalletError(createMessage);
+            setWalletDetails(null);
+            return;
+          }
+        }
+
+        const notFoundMessage =
+          status === 404
+            ? chain === 'hyperliquid'
+              ? 'Wallet not found. Make sure your Hyperliquid address is added as a tracked whale in the Settings / Whales page.'
+              : 'Wallet not found.'
+            : null;
+        const message =
+          notFoundMessage ||
+          (err instanceof Error ? err.message : 'Failed to load wallet details.');
+        setWalletError(message);
+        setWalletDetails(null);
+      });
+  }, [chain, address, refreshKey, isMyHyperliquidWallet, autoCreateAttempted]);
 
   useEffect(() => {
     if (!chain || !address) return;
@@ -256,10 +322,41 @@ export default function WhaleDetail() {
       })
       .finally(() => setTradesLoading(false));
   };
+  const { roi24hChange, portfolio24hChangeUsd, portfolio24hChangePct } = useMemo(() => {
+    const roiChange =
+      roiHistory.length >= 2
+        ? roiHistory[roiHistory.length - 1].roi_percent - roiHistory[roiHistory.length - 2].roi_percent
+        : null;
+
+    let valueChange: number | null = null;
+    let pctChange: number | null = null;
+    if (portfolioHistory.length >= 2) {
+      const latest = portfolioHistory[portfolioHistory.length - 1].value_usd;
+      const previous = portfolioHistory[portfolioHistory.length - 2].value_usd;
+      valueChange = latest - previous;
+      if (previous > 0) {
+        pctChange = (valueChange / previous) * 100;
+      }
+    }
+
+    return {
+      roi24hChange: roiChange,
+      portfolio24hChangeUsd: valueChange,
+      portfolio24hChangePct: pctChange,
+    };
+  }, [roiHistory, portfolioHistory]);
+
   const openTrades = positions;
+  const filteredTrades = useMemo(() => {
+    if (tradesTimeFilter === 'all') return trades;
+    const windowMs = tradesTimeFilter === '24h' ? 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+    const cutoff = Date.now() - windowMs;
+    return trades.filter((trade) => new Date(trade.timestamp).getTime() >= cutoff);
+  }, [trades, tradesTimeFilter]);
+
   const displayedTrades = useMemo(
-    () => (groupSimilarTrades ? aggregateTrades(trades) : trades),
-    [trades, groupSimilarTrades]
+    () => (groupSimilarTrades ? aggregateTrades(filteredTrades) : filteredTrades),
+    [filteredTrades, groupSimilarTrades]
   );
 
   // Auto-refresh trades/positions/backfill every 30s
@@ -294,24 +391,35 @@ export default function WhaleDetail() {
     );
   }
 
+  if (walletError) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px] text-center">
+        <p className="max-w-2xl text-sm text-muted-foreground">{walletError}</p>
+      </div>
+    );
+  }
+
   if (!walletDetails) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
-        <p className="text-muted-foreground">Loading wallet details...</p>
+        <p className="text-muted-foreground">
+          {walletError || 'Loading wallet details...'}
+        </p>
       </div>
     );
   }
 
   return (
     <div className="space-y-6 animate-fade-up">
-      {/* Back Link */}
-      <Link
-        to="/whales"
-        className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        Back to Whales
-      </Link>
+      {!hideBackLink && (
+        <Link
+          to="/whales"
+          className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to Whales
+        </Link>
+      )}
 
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div className="text-xs text-muted-foreground">
@@ -465,6 +573,32 @@ export default function WhaleDetail() {
       {/* Metrics Grid */}
       <WalletMetricsGrid metrics={walletDetails.metrics} />
 
+      {(roi24hChange !== null || portfolio24hChangeUsd !== null || portfolio24hChangePct !== null) && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
+          {portfolio24hChangeUsd !== null && (
+            <MetricCard
+              title="24h PnL"
+              value={formatUSD(portfolio24hChangeUsd)}
+              changeType={portfolio24hChangeUsd >= 0 ? 'positive' : 'negative'}
+            />
+          )}
+          {portfolio24hChangePct !== null && (
+            <MetricCard
+              title="24h Growth"
+              value={`${portfolio24hChangePct.toFixed(2)}%`}
+              changeType={portfolio24hChangePct >= 0 ? 'positive' : 'negative'}
+            />
+          )}
+          {roi24hChange !== null && (
+            <MetricCard
+              title="24h ROI Change"
+              value={`${roi24hChange.toFixed(2)}%`}
+              changeType={roi24hChange >= 0 ? 'positive' : 'negative'}
+            />
+          )}
+        </div>
+      )}
+
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="space-y-3">
@@ -606,15 +740,15 @@ export default function WhaleDetail() {
 
       {/* Trades Table */}
       <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <h2 className="text-lg font-semibold text-foreground">Trades</h2>
-              {tradesTotal !== null && (
-                <span className="text-xs text-muted-foreground">
-                  {tradesTotal.toLocaleString()} historical trades
-                </span>
-              )}
-            </div>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <h2 className="text-lg font-semibold text-foreground">Trades</h2>
+            {tradesTotal !== null && (
+              <span className="text-xs text-muted-foreground">
+                {tradesTotal.toLocaleString()} historical trades
+              </span>
+            )}
+          </div>
           <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2">
             <div className="flex items-center gap-2">
               <span className="text-xs text-muted-foreground">Direction</span>
@@ -622,6 +756,7 @@ export default function WhaleDetail() {
                 value={tradeDirection}
                 onChange={(e) => setTradeDirection(e.target.value as typeof tradeDirection)}
                 className="h-9 rounded-md border border-border bg-background px-2 text-xs"
+                aria-label="Direction filter"
               >
                 <option value="all">All</option>
                 <option value="long">Long</option>
@@ -632,6 +767,21 @@ export default function WhaleDetail() {
                 <option value="sell">Sell</option>
                 <option value="deposit">Deposit</option>
                 <option value="withdraw">Withdraw</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">Time</span>
+              <select
+                value={tradesTimeFilter}
+                onChange={(e) => setTradesTimeFilter(e.target.value as typeof tradesTimeFilter)}
+                className="h-9 rounded-md border border-border bg-background px-2 text-xs"
+                aria-label="Time filter"
+              >
+                {tradeTimeFilters.map((filter) => (
+                  <option key={filter.value} value={filter.value}>
+                    {filter.label}
+                  </option>
+                ))}
               </select>
             </div>
             <Tabs value={tradeSource} onValueChange={(value) => setTradeSource(value as typeof tradeSource)}>

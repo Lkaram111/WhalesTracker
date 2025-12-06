@@ -13,6 +13,7 @@ import About from "./pages/About";
 import NotFound from "./pages/NotFound";
 import CopierBacktest from "./pages/CopierBacktest";
 import LiveCopier from "./pages/LiveCopier";
+import MyAccount from "./pages/MyAccount";
 
 const queryClient = new QueryClient();
 
@@ -27,6 +28,7 @@ const App = () => (
             <Route path="/" element={<Dashboard />} />
             <Route path="/whales" element={<Whales />} />
             <Route path="/whales/:chain/:address" element={<WhaleDetail />} />
+            <Route path="/me" element={<MyAccount />} />
             <Route path="/live" element={<LiveFeed />} />
             <Route path="/backtest" element={<CopierBacktest />} />
             <Route path="/copier" element={<LiveCopier />} />

@@ -1,21 +1,23 @@
 import { NavLink } from '@/components/NavLink';
 import { useUIStore } from '@/stores/uiStore';
 import { cn } from '@/lib/utils';
-import { 
-  LayoutDashboard, 
-  Users, 
-  Radio, 
-  Settings, 
+import {
+  LayoutDashboard,
+  Users,
+  Radio,
+  Settings,
   Info,
   ChevronLeft,
   ChevronRight,
   Waves,
-  LineChart
+  LineChart,
+  User,
 } from 'lucide-react';
 
 const navItems = [
   { icon: LayoutDashboard, label: 'Dashboard', path: '/' },
   { icon: Users, label: 'Whales', path: '/whales' },
+  { icon: User, label: 'My Account', path: '/me' },
   { icon: Radio, label: 'Live Feed', path: '/live' },
   { icon: LineChart, label: 'Copier Backtest', path: '/backtest' },
   { icon: LineChart, label: 'Live Copier', path: '/copier' },
