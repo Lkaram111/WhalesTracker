@@ -157,6 +157,7 @@ def import_hl_history_from_s3(
     chain = session.scalar(select(Chain).where(Chain.slug == "hyperliquid"))
     if not chain:
         return {"imported": 0, "skipped": 0, "missing_chain": True}
+    chain_id = chain.id
 
     # Use AWS profile from settings or environment variable
     aws_profile = settings.aws_profile or os.environ.get("AWS_PROFILE")
@@ -272,7 +273,7 @@ def import_hl_history_from_s3(
                         continue
 
                     for fill in _iter_wallet_fills_from_line(parsed, wallet_lower):
-                        if _process_fill(session, whale, chain.id, fill, existing_tx_hashes):
+                        if _process_fill(session, whale, chain_id, fill, existing_tx_hashes):
                             imported += 1
                         else:
                             skipped += 1
