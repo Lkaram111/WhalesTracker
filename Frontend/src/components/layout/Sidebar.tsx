@@ -59,11 +59,11 @@ export function Sidebar() {
 
         {/* Brand logo */}
         {!sidebarCollapsed && (
-          <div className="border-b border-sidebar-border px-4 py-3">
+          <div className="border-b border-sidebar-border px-2 py-3">
             <img
               src="/Logo.png"
               alt="WhaleTracker logo"
-              className="h-12 w-auto rounded-md border border-sidebar-border/60 bg-sidebar-accent object-contain px-2 py-1"
+              className="h-16 w-full rounded-md border border-sidebar-border/60 bg-sidebar-accent object-contain px-3 py-2"
             />
           </div>
         )}
