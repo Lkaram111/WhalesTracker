@@ -25,7 +25,18 @@ if db_url.startswith("sqlite"):
     connect_args = {"check_same_thread": False, "timeout": 60}
     db_url = f"sqlite:///{path}"
 
-engine = create_engine(db_url, future=True, echo=False, connect_args=connect_args)
+engine_kwargs = {
+    "future": True,
+    "echo": False,
+    "connect_args": connect_args,
+    # pre_ping keeps connections fresh across idle periods; pool_recycle defends against MySQL timeouts.
+    "pool_pre_ping": True,
+}
+
+if not db_url.startswith("sqlite"):
+    engine_kwargs.update({"pool_recycle": 2800, "pool_timeout": 30})
+
+engine = create_engine(db_url, **engine_kwargs)
 
 # Improve SQLite concurrency (WAL + reasonable fsync)
 if db_url.startswith("sqlite"):
